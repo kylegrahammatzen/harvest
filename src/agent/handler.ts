@@ -92,7 +92,7 @@ export async function handleAgentMessage(thread: Thread, message: Message): Prom
 	const anthropic = getAnthropic();
 
 	try {
-		await thread.startTyping();
+		await thread.startTyping().catch(() => {});
 
 		const messages: Anthropic.MessageParam[] = [{ role: "user", content: message.text }];
 
@@ -155,7 +155,7 @@ export async function handleAgentMessage(thread: Thread, message: Message): Prom
 		const responseText = textBlocks.map((b) => b.text).join("\n");
 
 		if (responseText) {
-			await thread.post(responseText);
+			await thread.post({ markdown: responseText });
 		}
 	} catch (err) {
 		console.error("Agent error:", err);
