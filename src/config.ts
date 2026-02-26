@@ -19,8 +19,8 @@ const envSchema = z.object({
 		emptyStringToUndefined,
 		z.string().default("hAWUopQqLnsSwuRgeRzIBzKslwXmQUSr"),
 	),
-	PORT: z.coerce.number().default(31448),
-	BASE_URL: z.string().default("http://localhost:31448"),
+	PORT: z.coerce.number().default(3000),
+	BASE_URL: z.string().default("http://localhost:3000"),
 });
 
 export type Env = z.infer<typeof envSchema>;
