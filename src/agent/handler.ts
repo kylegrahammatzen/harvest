@@ -6,24 +6,27 @@ import { agentTools, MUTATING_TOOLS } from "@/agent/tools";
 import { getEnv } from "@/config";
 import { getWorkspaceIdFromRaw } from "@/lib/slack";
 import { createAutumnClient } from "@/services/autumn";
+import type { WorkspaceConfig } from "@/services/workspace";
 import { getWorkspace, listWorkspaces } from "@/services/workspace";
 
-const SYSTEM_PROMPT = `You are Autumn, an AI billing operations assistant for Autumn (useautumn.com).
-You help teams manage their customers, subscriptions, usage, and billing through Slack.
+const SYSTEM_PROMPT = `You are Autumn, a billing ops assistant in Slack for Autumn (useautumn.com). You manage customers, subscriptions, usage, and billing through tools.
 
-You have access to tools that interact with the Autumn billing API. Use them to answer questions and perform actions.
+Rules:
+- For mutating tools, write a short summary of what you'll do. Confirm/Cancel buttons appear automatically — never ask the user to confirm in text.
+- For read tools, run them and present results directly.
+- If a tool errors, explain clearly and suggest next steps.
+- When a user refers to a customer by name or email (not an exact ID), use list_customers first and search the results by name/email to find the match. Then use the exact customer ID from the API response for any further tool calls. Never guess or construct customer IDs — always use the exact value returned by the API.
+- When a user refers to a plan by name, use list_plans to find the correct plan ID before using it in mutations.
+- When multiple customers match a name, list them with IDs and ask which one.
+- Customers with a null external ID are normal — they were created in Autumn but haven't logged into the product yet. Their email serves as their identifier. Never suggest recreating or deleting these customers.
+- If someone asks what you can do, give a brief 2-3 sentence overview, not a full list.
 
-Important rules:
-- For MUTATING tools (create_balance, set_balance, track_usage, attach_plan, update_subscription, generate_checkout_url, setup_payment, update_customer, create_referral_code, redeem_referral_code), produce a concise summary of what you're about to do. Confirm/Cancel buttons appear automatically — do NOT ask the user to confirm in text.
-- For READ tools, execute them directly and present the results clearly.
-- For COMPUTED tools, execute the underlying queries and synthesize the results.
-- Be concise. Format responses for Slack readability (use *bold*, \`code\`, bullet points).
-- When showing usage data, include relevant numbers and percentages.
-- If a tool returns an error, explain it clearly and suggest next steps.
-
-Disambiguation:
-- When a user references a customer by name and multiple customers match, list the matches with their IDs and ask which one they mean before proceeding.
-- Always confirm you have the right customer before executing a mutating action.`;
+Formatting:
+- This is Slack. Use *bold*, \`code\` for IDs/values, and • for lists.
+- Always wrap email addresses in backticks like \`user@example.com\`. Slack mangles bare @ symbols into broken mentions.
+- No emojis ever.
+- Be concise. No filler like "Sure!", "Great question!", "I'd be happy to help!".
+- When presenting customer info, only show relevant fields — skip empty or null ones.`;
 
 let _anthropic: Anthropic | null = null;
 
@@ -46,58 +49,54 @@ async function resolveWorkspaceId(raw: unknown): Promise<string | null> {
 }
 
 export async function handleAgentMention(thread: Thread, message: Message): Promise<void> {
-	const workspaceId = await resolveWorkspaceId(message.raw);
-	if (!workspaceId) {
-		await thread.post(
-			"Autumn could not resolve this workspace yet, so ask an admin to run `/connect` first.",
-		);
+	if (thread.isDM) {
+		await thread.post("DMs aren't supported yet, mention me in a channel instead.");
 		return;
 	}
 
-	const workspace = await getWorkspace(workspaceId);
+	const workspaceId = await resolveWorkspaceId(message.raw);
+	const workspace = workspaceId ? await getWorkspace(workspaceId) : null;
+
+	await thread.subscribe();
 
 	if (!workspace) {
+		await thread.post("Ask an admin to run `/connect` to set up Autumn for this workspace.");
+		return;
+	}
+
+	if (!workspace.apiKey) {
 		await thread.post(
-			"Autumn is not configured for this Slack workspace yet, so ask an admin to run `/connect`.",
+			"This workspace isn't connected to Autumn yet, run `/connect` to get started.",
 		);
 		return;
 	}
 
 	if (
-		thread.channelId &&
 		workspace.commandChannels.length > 0 &&
+		thread.channelId &&
 		!workspace.commandChannels.includes(thread.channelId)
 	) {
-		await thread.post(
-			"Autumn mentions only work in configured channels, so ask an admin to add this channel in settings.",
-		);
+		await thread.post("Autumn isn't enabled in this channel, ask an admin to add it in settings.");
 		return;
 	}
 
-	await thread.subscribe();
 	await runAgentLoop(thread, message);
 }
 
 export async function handleAgentMessage(thread: Thread, message: Message): Promise<void> {
+	if (thread.isDM) return;
+
 	const workspaceId = await resolveWorkspaceId(message.raw);
-	if (!workspaceId) {
-		await thread.post(
-			"Autumn could not resolve this workspace yet, so ask an admin to run `/connect` first.",
-		);
+	const workspace = workspaceId ? await getWorkspace(workspaceId) : null;
+
+	if (!workspace?.apiKey) {
+		await thread.post("Run `/connect` to set up Autumn first.");
 		return;
 	}
 
-	const workspace = await getWorkspace(workspaceId);
-
-	if (!workspace) {
-		await thread.post(
-			"Autumn is not configured for this Slack workspace yet, so ask an admin to run `/connect`.",
-		);
-		return;
-	}
 	if (
-		thread.channelId &&
 		workspace.commandChannels.length > 0 &&
+		thread.channelId &&
 		!workspace.commandChannels.includes(thread.channelId)
 	)
 		return;
@@ -105,10 +104,82 @@ export async function handleAgentMessage(thread: Thread, message: Message): Prom
 	await runAgentLoop(thread, message);
 }
 
+const MAX_HISTORY = 20;
+const SUMMARIZE_THRESHOLD = 10;
+
+async function buildMessages(
+	thread: Thread,
+	message: Message,
+	anthropic: Anthropic,
+): Promise<Anthropic.MessageParam[]> {
+	const history: { role: "user" | "assistant"; content: string }[] = [];
+
+	for await (const msg of thread.allMessages) {
+		if (!msg.text.trim()) continue;
+		history.push({
+			role: msg.author.isMe ? "assistant" : "user",
+			content: msg.text,
+		});
+		if (history.length >= MAX_HISTORY) break;
+	}
+
+	if (history.length <= 1) {
+		return [{ role: "user", content: message.text }];
+	}
+
+	if (history.length > SUMMARIZE_THRESHOLD) {
+		const older = history.slice(0, -3);
+		const recent = history.slice(-3);
+		const transcript = older.map((m) => `${m.role}: ${m.content}`).join("\n");
+
+		const summary = await anthropic.messages.create({
+			model: "claude-haiku-4-5-20251001",
+			max_tokens: 512,
+			messages: [
+				{
+					role: "user",
+					content: `Summarize this conversation in 2-3 sentences. Preserve all exact customer IDs, plan IDs, and email addresses mentioned. Focus on what was discussed and any pending requests:\n\n${transcript}`,
+				},
+			],
+		});
+
+		const summaryText = summary.content
+			.filter((b): b is Anthropic.TextBlock => b.type === "text")
+			.map((b) => b.text)
+			.join("");
+
+		return [
+			{ role: "user", content: `[Previous conversation summary: ${summaryText}]` },
+			{
+				role: "assistant",
+				content: "Understood, I have the context from our previous conversation.",
+			},
+			...recent,
+		];
+	}
+
+	return history;
+}
+
 type PendingMutation = {
 	toolName: string;
 	toolInput: Record<string, unknown>;
 };
+
+export async function runAgentWithContext(
+	thread: Thread<unknown>,
+	raw: unknown,
+	text: string,
+): Promise<void> {
+	const workspaceId = await resolveWorkspaceId(raw);
+	if (!workspaceId) return;
+
+	const workspace = await getWorkspace(workspaceId);
+	if (!workspace?.apiKey) return;
+
+	console.log(`Agent (recovery): "${text.slice(0, 80)}" (${workspace.orgName})`);
+	await runAgentLoopInner(thread, workspace, [{ role: "user", content: text }]);
+}
 
 async function runAgentLoop(thread: Thread, message: Message): Promise<void> {
 	const workspaceId = await resolveWorkspaceId(message.raw);
@@ -120,13 +191,22 @@ async function runAgentLoop(thread: Thread, message: Message): Promise<void> {
 	const text = message.text.length > 80 ? `${message.text.slice(0, 80)}...` : message.text;
 	console.log(`Agent: "${text}" (${workspace.orgName})`);
 
-	const autumn = createAutumnClient(workspace);
 	const anthropic = getAnthropic();
+	const messages = await buildMessages(thread, message, anthropic);
+	await runAgentLoopInner(thread, workspace, messages);
+}
 
+async function runAgentLoopInner(
+	thread: Thread<unknown>,
+	workspace: WorkspaceConfig,
+	messages: Anthropic.MessageParam[],
+): Promise<void> {
 	try {
+		const autumn = createAutumnClient(workspace);
+		const anthropic = getAnthropic();
+
 		await thread.startTyping().catch(() => {});
 
-		const messages: Anthropic.MessageParam[] = [{ role: "user", content: message.text }];
 		let pendingMutation: PendingMutation | null = null;
 
 		let response = await anthropic.messages.create({
@@ -193,7 +273,6 @@ async function runAgentLoop(thread: Thread, message: Message): Promise<void> {
 		if (responseText && pendingMutation) {
 			await thread.post(
 				Card({
-					title: "Confirm Action",
 					children: [
 						Text(responseText),
 						Actions([
@@ -206,7 +285,7 @@ async function runAgentLoop(thread: Thread, message: Message): Promise<void> {
 									...pendingMutation.toolInput,
 								}),
 							}),
-							Button({ id: "cancel", label: "Cancel" }),
+							Button({ id: "cancel", label: "Cancel", style: "danger" }),
 						]),
 					],
 				}),
@@ -215,7 +294,12 @@ async function runAgentLoop(thread: Thread, message: Message): Promise<void> {
 			await thread.post({ markdown: responseText });
 		}
 	} catch (err) {
-		console.error("Agent error:", err);
-		await thread.post("Something went wrong processing your request. Check the logs for details.");
+		const message = err instanceof Error ? err.message : String(err);
+		console.error("Agent loop failed", {
+			error: message,
+			org: workspace.orgName,
+			thread: thread.id,
+		});
+		await thread.post("Something went wrong, try again later.");
 	}
 }
