@@ -6,15 +6,15 @@ import { handleAgentMention, handleAgentMessage } from "@/agent/handler";
 import { handleSlashCommandByName } from "@/commands/router";
 import { getWorkspace, listWorkspaces } from "@/services/workspace";
 
+export const slackAdapter = createSlackAdapter({
+	clientId: process.env.SLACK_CLIENT_ID,
+	clientSecret: process.env.SLACK_CLIENT_SECRET,
+});
+
 export const bot = new Chat({
 	userName: "autumn",
-	logger: "silent",
-	adapters: {
-		slack: createSlackAdapter({
-			clientId: process.env.SLACK_CLIENT_ID,
-			clientSecret: process.env.SLACK_CLIENT_SECRET,
-		}),
-	},
+	logger: "warn",
+	adapters: { slack: slackAdapter },
 	state: createRedisState(),
 });
 
@@ -22,7 +22,7 @@ bot.onSlashCommand(async (event) => {
 	await handleSlashCommandByName(event);
 });
 
-bot.onNewMention(async (thread, message) => {
+bot.onNewMessage(/@Autumn/i, async (thread, message) => {
 	await handleAgentMention(thread, message);
 });
 
@@ -36,6 +36,18 @@ bot.onAction("confirm", async (event) => {
 
 bot.onAction("cancel", async (event) => {
 	await handleCancelAction(event);
+});
+
+bot.onAssistantThreadStarted(async (event) => {
+	try {
+		await slackAdapter.setSuggestedPrompts(event.channelId, event.threadTs, [
+			{ title: "Customer lookup", message: "What plan is customer acme on?" },
+			{ title: "Usage check", message: "Show me usage for customer acme" },
+			{ title: "Attach a plan", message: "Attach the Pro plan to customer acme" },
+		]);
+	} catch (err) {
+		console.error("assistant_thread_started error:", err);
+	}
 });
 
 bot.onAppHomeOpened(async (event) => {
