@@ -92,6 +92,8 @@ export async function handleAgentMessage(thread: Thread, message: Message): Prom
 	const anthropic = getAnthropic();
 
 	try {
+		await thread.startTyping();
+
 		const messages: Anthropic.MessageParam[] = [{ role: "user", content: message.text }];
 
 		let response = await anthropic.messages.create({
