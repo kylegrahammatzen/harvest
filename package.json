@@ -1,0 +1,31 @@
+{
+	"name": "harvest",
+	"version": "0.1.0",
+	"description": "Autumn's Slack automation engine",
+	"type": "module",
+	"scripts": {
+		"setup": "bun run scripts/setup.ts",
+		"dev": "bun run --watch src/index.ts",
+		"start": "bun run src/index.ts",
+		"check": "biome check .",
+		"check:fix": "biome check --write .",
+		"typecheck": "tsc --noEmit"
+	},
+	"dependencies": {
+		"hono": "^4",
+		"chat": "latest",
+		"@chat-adapter/slack": "latest",
+		"@chat-adapter/state-redis": "latest",
+		"autumn-js": "beta",
+		"@anthropic-ai/sdk": "latest",
+		"svix": "^1",
+		"zod": "^3",
+		"ioredis": "^5"
+	},
+	"devDependencies": {
+		"typescript": "^5",
+		"@types/bun": "latest",
+		"@biomejs/biome": "latest"
+	},
+	"license": "MIT"
+}
