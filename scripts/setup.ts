@@ -139,7 +139,7 @@ function printNextSteps() {
 	console.log("  3. Start the dev server:");
 	console.log("     bun dev\n");
 	console.log("  4. Expose with a tunnel:");
-	console.log("     ngrok http 31448\n");
+	console.log("     ngrok http 3000\n");
 	console.log("  5. Update Slack Event Subscriptions URL to:");
 	console.log("     https://<tunnel>/webhooks/slack\n");
 	console.log("  6. Validate/deploy Slack manifest:");

@@ -1,6 +1,6 @@
-# Harvest
+# Autumn Slack Bot
 
-Harvest is Autumn's Slack automation engine. It provides slash commands, webhook-driven alerts, and an AI agent for managing billing operations through chat.
+Autumn's Slack bot where users interact with `@Autumn` via natural language for all billing operations. No billing slash commands, just an AI agent with confirmation buttons for mutations.
 
 ## Tech Stack
 
@@ -17,47 +17,71 @@ Harvest is Autumn's Slack automation engine. It provides slash commands, webhook
 ```
 src/
 ├── index.ts           Hono server entry point
-├── bot.ts             Chat SDK instance and event handlers
+├── bot.ts             Chat SDK instance, event handlers, App Home
 ├── config.ts          Env validation
 ├── routes/
 │   ├── webhooks.ts    Chat SDK webhook handler (/webhooks/slack)
-│   ├── autumn.ts      Autumn webhook receiver (/autumn/webhooks)
-│   └── install.ts     Slack OAuth flow (/install/slack)
+│   ├── autumn.ts      Autumn webhooks + Svix verification + alert routing
+│   ├── install.ts     Slack OAuth + welcome DM (/install/slack)
+│   └── connect.ts     Autumn OAuth (/connect)
 ├── commands/
-│   ├── router.ts      /autumn <subcommand> parser
-│   ├── connect.ts     /autumn connect (OTP onboarding)
-│   ├── customer.ts    /autumn customer <id>
-│   ├── usage.ts       /autumn usage <id>
-│   ├── balance.ts     /autumn balance <id> <feature> <amount>
-│   ├── checkout.ts    /autumn checkout <id> <plan>
-│   └── renewals.ts    /autumn upcoming-renewals <period>
-├── alerts/
-│   └── router.ts      Route Autumn webhook events to alert cards
+│   ├── router.ts      /connect + /disconnect only
+│   ├── connect.ts     /connect (Autumn OAuth onboarding)
+│   └── disconnect.ts  /disconnect
 ├── agent/
-│   ├── handler.ts     onNewMention + onSubscribedMessage -> Claude
-│   ├── tools.ts       Tool definitions for Claude
+│   ├── handler.ts     @Autumn mention -> Claude agent loop + confirm cards
+│   ├── tools.ts       Tool definitions (26 tools)
 │   ├── executor.ts    Tool execution (read + computed)
-│   └── confirm.ts     Confirmation flow for mutating tools
+│   └── confirm.ts     Confirmation execution (10 mutating tools)
 ├── cards/
-│   ├── customer.ts    Customer info card
-│   ├── usage.ts       Usage breakdown card
-│   ├── alert.ts       Alert notification cards
-│   └── renewal.ts     Renewal list card
+│   └── alert.ts       Webhook alert cards
 ├── services/
 │   ├── autumn.ts      Per-tenant Autumn SDK factory
-│   ├── workspace.ts   Redis workspace credential store
-│   └── encryption.ts  AES-256-GCM encryption for API keys
+│   ├── workspace.ts   Redis workspace store (encrypted)
+│   ├── encryption.ts  AES-256-GCM
+│   └── renewals.ts    Upcoming renewal computation
+├── lib/
+│   ├── slack.ts       Workspace ID extraction + error helpers
+│   └── redis.ts       Redis singleton
 └── utils/
-    └── formatters.ts  Formatters
+    └── formatters.ts  formatNumber, parseDuration
 ```
+
+## Agent-First
+
+All billing operations go through `@Autumn` mentions with 26 tools (16 read/computed, 10 mutating) where mutations trigger Confirm/Cancel buttons automatically and ambiguous customer names are disambiguated before acting.
 
 ## Multi-Tenant
 
-Each Slack workspace stores credentials encrypted in Redis. On every event, the workspace is resolved, credentials are decrypted, and a per-tenant Autumn SDK instance is created. Channel-based access control restricts where commands and the agent operate.
+Each Slack workspace stores encrypted credentials in Redis that get decrypted per-event to create a per-tenant Autumn SDK instance, with channel-based access control.
+
+## Onboarding
+
+1. Install via Slack OAuth -> welcome DM with Connect button
+2. `/connect` triggers Autumn OAuth (PKCE)
+3. Prod API key is provisioned automatically
+4. App Home shows connection status
 
 ## Auth
 
-Users connect via `/autumn connect` which triggers Autumn's OTP flow (same as `atmn login`). No API keys are pasted in chat.
+Users connect via `/connect` which triggers Autumn's OAuth flow. No API keys are pasted in chat.
+
+## Workspace Config
+
+```typescript
+type WorkspaceConfig = {
+  workspaceId: string;
+  apiKey: string | null;
+  orgSlug: string;
+  orgName: string;
+  commandChannels: string[];
+  alertChannel: string | null;
+  slackBotToken: string | null;
+  webhookSecret: string | null;
+  installedAt: number;
+  installedBy: string;
+};
+```
 
 ## Commands
 
