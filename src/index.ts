@@ -2,35 +2,33 @@ import { Hono } from "hono";
 import { logger } from "hono/logger";
 import { getEnv } from "@/config";
 import { autumnWebhookRoutes } from "@/routes/autumn";
-import { connectRoutes, handleOAuthCallback } from "@/routes/connect";
+import { connectRoutes } from "@/routes/connect";
 import { installRoutes } from "@/routes/install";
 import { webhookRoutes } from "@/routes/webhooks";
+import { listWorkspaces } from "@/services/workspace";
 
 const app = new Hono();
 
 app.use("*", logger());
 
-app.get("/", async (c) => {
-	const code = c.req.query("code");
-	const state = c.req.query("state");
-	const error = c.req.query("error");
-
-	if (code || state || error) {
-		return handleOAuthCallback(c);
-	}
-
-	return c.json({ name: "autumn", status: "ok" });
-});
+app.get("/", (c) => c.json({ name: "autumn", status: "ok" }));
 app.get("/health", (c) => c.json({ status: "ok" }));
 app.get("/favicon.ico", (c) => c.body(null, 204));
 
 app.route("/webhooks", webhookRoutes);
 app.route("/autumn/webhooks", autumnWebhookRoutes);
-app.route("/install", installRoutes);
+app.route("/", installRoutes);
 app.route("/connect", connectRoutes);
 
 const env = getEnv();
-console.log(`Autumn starting on port ${env.PORT}...`);
+
+listWorkspaces()
+	.then((ids) =>
+		console.log(
+			`Autumn Slack bot running on port ${env.PORT} (${ids.length} workspace${ids.length === 1 ? "" : "s"})`,
+		),
+	)
+	.catch(() => console.log(`Autumn Slack bot running on port ${env.PORT} (no Redis)`));
 
 export default {
 	port: env.PORT,

@@ -1,8 +1,8 @@
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { bot } from "@/bot";
-import { isRedisUnavailable } from "@/lib/errors";
 import { getRedis } from "@/lib/redis";
+import { isRedisUnavailable } from "@/lib/slack";
 
 type Platform = keyof typeof bot.webhooks;
 

@@ -1,5 +1,7 @@
 import { Hono } from "hono";
+import { bot } from "@/bot";
 import { getEnv } from "@/config";
+import { getWorkspace, saveWorkspace } from "@/services/workspace";
 
 export const installRoutes = new Hono();
 
@@ -12,77 +14,77 @@ installRoutes.get("/slack", (c) => {
 	}
 
 	const scopes = [
+		// Messaging
+		"chat:write",
+		"commands",
+		// Assistant
+		"assistant:write",
+		// Channel access
 		"app_mentions:read",
 		"channels:history",
 		"channels:read",
-		"chat:write",
-		"commands",
 		"groups:history",
 		"groups:read",
+		// DMs
 		"im:history",
 		"im:read",
+		"im:write",
 		"mpim:history",
 		"mpim:read",
-		"reactions:read",
-		"reactions:write",
+		// Users
 		"users:read",
 	].join(",");
 
-	const redirectUri = `${env.BASE_URL}/install/slack/callback`;
+	const redirectUri = `${env.BASE_URL}/slack/callback`;
 	const url = `https://slack.com/oauth/v2/authorize?client_id=${clientId}&scope=${scopes}&redirect_uri=${encodeURIComponent(redirectUri)}`;
 
 	return c.redirect(url);
 });
 
 installRoutes.get("/slack/callback", async (c) => {
-	const env = getEnv();
-	const code = c.req.query("code");
-
-	if (!code) {
-		return c.text("Missing code parameter", 400);
-	}
-
 	try {
-		const response = await fetch("https://slack.com/api/oauth.v2.access", {
-			method: "POST",
-			headers: { "Content-Type": "application/x-www-form-urlencoded" },
-			body: new URLSearchParams({
-				client_id: env.SLACK_CLIENT_ID || "",
-				client_secret: env.SLACK_CLIENT_SECRET || "",
-				code,
-				redirect_uri: `${env.BASE_URL}/install/slack/callback`,
-			}),
+		const slack = bot.getAdapter("slack");
+		const { teamId, installation } = await slack.handleOAuthCallback(c.req.raw);
+
+		const existing = await getWorkspace(teamId);
+		await saveWorkspace({
+			workspaceId: teamId,
+			apiKey: existing?.apiKey || null,
+			orgSlug: existing?.orgSlug || "",
+			orgName: existing?.orgName || installation.teamName || "",
+			commandChannels: existing?.commandChannels || [],
+			alertChannel: existing?.alertChannel || null,
+			slackBotToken: installation.botToken || null,
+			webhookSecret: existing?.webhookSecret || null,
+			installedAt: existing?.installedAt || Date.now(),
+			installedBy: installation.botUserId || "unknown",
 		});
 
-		const data = (await response.json()) as {
-			ok: boolean;
-			error?: string;
-			team?: { id: string; name: string };
-			access_token?: string;
-			bot_user_id?: string;
-			authed_user?: { id: string };
-		};
-
-		if (!data.ok) {
-			console.error("Slack OAuth error:", data.error);
-			return c.text(`Slack OAuth failed: ${data.error}`, 400);
-		}
-
-		// TODO: Save the bot token + workspace info, then trigger onboarding DM
-		console.log(`Slack bot installed to workspace: ${data.team?.name} (${data.team?.id})`);
+		console.log(`Slack bot installed: ${installation.teamName} (${teamId})`);
 
 		return c.html(`
 			<html>
 				<body style="font-family: system-ui; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
 					<div style="text-align: center;">
-						<h1>Harvest installed!</h1>
-						<p>Head back to Slack — I'll send you a DM to finish setup.</p>
+						<h1>Autumn installed!</h1>
+						<p>Head back to Slack and run /connect to finish setup.</p>
 					</div>
 				</body>
 			</html>
 		`);
 	} catch (err) {
-		console.error("Slack OAuth exchange failed:", err);
-		return c.text("OAuth exchange failed", 500);
+		const message = err instanceof Error ? err.message : String(err);
+		const isInvalidCode = message.includes("invalid_code");
+		console.error(`Slack OAuth failed: ${isInvalidCode ? "invalid_code" : message}`);
+		return c.html(`
+			<html>
+				<body style="font-family: system-ui; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
+					<div style="text-align: center;">
+						<h1>Installation failed</h1>
+						<p>${isInvalidCode ? "The authorization code expired or was already used, try installing again." : "Something went wrong during installation, try again from <a href=\"/slack\">/slack</a>."}</p>
+					</div>
+				</body>
+			</html>
+		`, 400);
 	}
 });
