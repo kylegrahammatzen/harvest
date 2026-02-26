@@ -4,13 +4,13 @@ import { decrypt, encrypt } from "@/services/encryption";
 
 export type WorkspaceConfig = {
 	workspaceId: string;
-	autumnApiKey: string;
-	environment: "sandbox" | "live";
+	apiKey: string | null;
 	orgSlug: string;
 	orgName: string;
 	commandChannels: string[];
 	alertChannel: string | null;
 	slackBotToken: string | null;
+	webhookSecret: string | null;
 	installedAt: number;
 	installedBy: string;
 };
@@ -23,19 +23,26 @@ export async function getWorkspace(workspaceId: string): Promise<WorkspaceConfig
 	if (!data) return null;
 
 	const workspace = JSON.parse(data) as WorkspaceConfig;
+	const encKey = getEnv().ENCRYPTION_KEY;
 
-	workspace.autumnApiKey = await decrypt(workspace.autumnApiKey, getEnv().ENCRYPTION_KEY);
+	if (workspace.apiKey) {
+		workspace.apiKey = await decrypt(workspace.apiKey, encKey);
+	}
+	if (workspace.webhookSecret) {
+		workspace.webhookSecret = await decrypt(workspace.webhookSecret, encKey);
+	}
 
 	return workspace;
 }
 
 export async function saveWorkspace(workspace: WorkspaceConfig): Promise<void> {
 	const redis = getRedis();
-	const env = getEnv();
+	const encKey = getEnv().ENCRYPTION_KEY;
 
 	const toStore: WorkspaceConfig = {
 		...workspace,
-		autumnApiKey: await encrypt(workspace.autumnApiKey, env.ENCRYPTION_KEY),
+		apiKey: workspace.apiKey ? await encrypt(workspace.apiKey, encKey) : null,
+		webhookSecret: workspace.webhookSecret ? await encrypt(workspace.webhookSecret, encKey) : null,
 	};
 
 	await redis.set(`${KEY_PREFIX}${workspace.workspaceId}`, JSON.stringify(toStore));
@@ -62,9 +69,4 @@ export async function listWorkspaces(): Promise<string[]> {
 	const redis = getRedis();
 	const keys = await redis.keys(`${KEY_PREFIX}*`);
 	return keys.map((k) => k.replace(KEY_PREFIX, ""));
-}
-
-export function isCommandChannel(workspace: WorkspaceConfig, channelId: string): boolean {
-	if (workspace.commandChannels.length === 0) return true;
-	return workspace.commandChannels.includes(channelId);
 }
