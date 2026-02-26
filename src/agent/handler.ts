@@ -1,11 +1,12 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type { Message, Thread } from "chat";
+import { Actions, Button, Card, CardText as Text } from "chat";
 import { executeTool } from "@/agent/executor";
 import { agentTools, MUTATING_TOOLS } from "@/agent/tools";
 import { getEnv } from "@/config";
 import { getWorkspaceIdFromRaw } from "@/lib/slack";
 import { createAutumnClient } from "@/services/autumn";
-import { getWorkspace, isCommandChannel, listWorkspaces } from "@/services/workspace";
+import { getWorkspace, listWorkspaces } from "@/services/workspace";
 
 const SYSTEM_PROMPT = `You are Autumn, an AI billing operations assistant for Autumn (useautumn.com).
 You help teams manage their customers, subscriptions, usage, and billing through Slack.
@@ -13,12 +14,16 @@ You help teams manage their customers, subscriptions, usage, and billing through
 You have access to tools that interact with the Autumn billing API. Use them to answer questions and perform actions.
 
 Important rules:
-- For MUTATING tools (create_balance, set_balance, track_usage, attach_plan, update_subscription, generate_checkout_url, setup_payment, update_customer, create_referral_code, redeem_referral_code), ALWAYS describe what you're about to do and return a confirmation request. Never execute these silently.
+- For MUTATING tools (create_balance, set_balance, track_usage, attach_plan, update_subscription, generate_checkout_url, setup_payment, update_customer, create_referral_code, redeem_referral_code), produce a concise summary of what you're about to do. Confirm/Cancel buttons appear automatically — do NOT ask the user to confirm in text.
 - For READ tools, execute them directly and present the results clearly.
 - For COMPUTED tools, execute the underlying queries and synthesize the results.
 - Be concise. Format responses for Slack readability (use *bold*, \`code\`, bullet points).
 - When showing usage data, include relevant numbers and percentages.
-- If a tool returns an error, explain it clearly and suggest next steps.`;
+- If a tool returns an error, explain it clearly and suggest next steps.
+
+Disambiguation:
+- When a user references a customer by name and multiple customers match, list the matches with their IDs and ask which one they mean before proceeding.
+- Always confirm you have the right customer before executing a mutating action.`;
 
 let _anthropic: Anthropic | null = null;
 
@@ -58,7 +63,11 @@ export async function handleAgentMention(thread: Thread, message: Message): Prom
 		return;
 	}
 
-	if (thread.channelId && !isCommandChannel(workspace, thread.channelId)) {
+	if (
+		thread.channelId &&
+		workspace.commandChannels.length > 0 &&
+		!workspace.commandChannels.includes(thread.channelId)
+	) {
 		await thread.post(
 			"Autumn mentions only work in configured channels, so ask an admin to add this channel in settings.",
 		);
@@ -66,7 +75,7 @@ export async function handleAgentMention(thread: Thread, message: Message): Prom
 	}
 
 	await thread.subscribe();
-	await thread.post("I'm listening! Ask me anything about your billing data.");
+	await runAgentLoop(thread, message);
 }
 
 export async function handleAgentMessage(thread: Thread, message: Message): Promise<void> {
@@ -86,7 +95,30 @@ export async function handleAgentMessage(thread: Thread, message: Message): Prom
 		);
 		return;
 	}
-	if (thread.channelId && !isCommandChannel(workspace, thread.channelId)) return;
+	if (
+		thread.channelId &&
+		workspace.commandChannels.length > 0 &&
+		!workspace.commandChannels.includes(thread.channelId)
+	)
+		return;
+
+	await runAgentLoop(thread, message);
+}
+
+type PendingMutation = {
+	toolName: string;
+	toolInput: Record<string, unknown>;
+};
+
+async function runAgentLoop(thread: Thread, message: Message): Promise<void> {
+	const workspaceId = await resolveWorkspaceId(message.raw);
+	if (!workspaceId) return;
+
+	const workspace = await getWorkspace(workspaceId);
+	if (!workspace) return;
+
+	const text = message.text.length > 80 ? `${message.text.slice(0, 80)}...` : message.text;
+	console.log(`Agent: "${text}" (${workspace.orgName})`);
 
 	const autumn = createAutumnClient(workspace);
 	const anthropic = getAnthropic();
@@ -95,6 +127,7 @@ export async function handleAgentMessage(thread: Thread, message: Message): Prom
 		await thread.startTyping().catch(() => {});
 
 		const messages: Anthropic.MessageParam[] = [{ role: "user", content: message.text }];
+		let pendingMutation: PendingMutation | null = null;
 
 		let response = await anthropic.messages.create({
 			model: "claude-sonnet-4-20250514",
@@ -113,13 +146,17 @@ export async function handleAgentMessage(thread: Thread, message: Message): Prom
 
 			for (const toolUse of toolUseBlocks) {
 				if (MUTATING_TOOLS.has(toolUse.name)) {
+					pendingMutation = {
+						toolName: toolUse.name,
+						toolInput: toolUse.input as Record<string, unknown>,
+					};
 					toolResults.push({
 						type: "tool_result",
 						tool_use_id: toolUse.id,
 						content: JSON.stringify({
 							status: "confirmation_required",
 							message:
-								"This is a mutating action. Describe what you're about to do and present the details to the user. They will need to confirm via a button before this executes.",
+								"This is a mutating action. Describe what you're about to do clearly and concisely. Confirm/Cancel buttons will appear automatically after your message.",
 							tool_name: toolUse.name,
 							params: toolUse.input,
 						}),
@@ -151,10 +188,30 @@ export async function handleAgentMessage(thread: Thread, message: Message): Prom
 		}
 
 		const textBlocks = response.content.filter((b): b is Anthropic.TextBlock => b.type === "text");
-
 		const responseText = textBlocks.map((b) => b.text).join("\n");
 
-		if (responseText) {
+		if (responseText && pendingMutation) {
+			await thread.post(
+				Card({
+					title: "Confirm Action",
+					children: [
+						Text(responseText),
+						Actions([
+							Button({
+								id: "confirm",
+								label: "Confirm",
+								style: "primary",
+								value: JSON.stringify({
+									action: pendingMutation.toolName,
+									...pendingMutation.toolInput,
+								}),
+							}),
+							Button({ id: "cancel", label: "Cancel" }),
+						]),
+					],
+				}),
+			);
+		} else if (responseText) {
 			await thread.post({ markdown: responseText });
 		}
 	} catch (err) {

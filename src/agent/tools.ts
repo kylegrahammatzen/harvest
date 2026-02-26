@@ -195,12 +195,28 @@ export const agentTools: Anthropic.Tool[] = [
 	{
 		name: "attach_plan",
 		description:
-			"Subscribe a customer to a plan. Handles new subscriptions, upgrades, and downgrades. REQUIRES USER CONFIRMATION before executing.",
+			"Subscribe a customer to a plan. Handles new subscriptions, upgrades, and downgrades. Supports custom pricing, trial days, success URLs, and invoice mode. REQUIRES USER CONFIRMATION before executing.",
 		input_schema: {
 			type: "object" as const,
 			properties: {
 				customer_id: { type: "string", description: "The customer ID" },
 				plan_id: { type: "string", description: "The plan/product ID to attach" },
+				customize: {
+					type: "object",
+					description: "Override plan defaults (custom pricing, trial)",
+					properties: {
+						price: { type: "number", description: "Custom price in dollars (e.g. 29.99)" },
+						trial_days: { type: "number", description: "Custom trial period in days" },
+					},
+				},
+				success_url: {
+					type: "string",
+					description: "URL to redirect to after successful checkout",
+				},
+				invoice_mode: {
+					type: "boolean",
+					description: "If true, create an invoice instead of a checkout session",
+				},
 			},
 			required: ["customer_id", "plan_id"],
 		},
