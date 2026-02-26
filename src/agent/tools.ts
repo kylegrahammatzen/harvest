@@ -147,6 +147,19 @@ export const agentTools: Anthropic.Tool[] = [
 	},
 
 	{
+		name: "create_customer",
+		description:
+			"Create a new customer in Autumn. Only an email is required, the system generates the ID. REQUIRES USER CONFIRMATION before executing.",
+		input_schema: {
+			type: "object" as const,
+			properties: {
+				name: { type: "string", description: "Customer display name" },
+				email: { type: "string", description: "Customer email address" },
+			},
+			required: ["email"],
+		},
+	},
+	{
 		name: "create_balance",
 		description:
 			"Create a new balance for a customer feature. Adds an additive one-off or recurring balance. REQUIRES USER CONFIRMATION before executing.",
@@ -315,80 +328,10 @@ export const agentTools: Anthropic.Tool[] = [
 			required: ["code", "customer_id"],
 		},
 	},
-
-	{
-		name: "upcoming_renewals",
-		description:
-			"Find customers whose subscriptions renew within a given time period. Combines customer listing with renewal date filtering.",
-		input_schema: {
-			type: "object" as const,
-			properties: {
-				period: {
-					type: "string",
-					description: "Time window, e.g. '7d', '14d', '30d'",
-				},
-			},
-			required: ["period"],
-		},
-	},
-	{
-		name: "customers_near_limit",
-		description:
-			"Find customers who are approaching their usage limits (above 80% by default). Scans all customers and their feature balances.",
-		input_schema: {
-			type: "object" as const,
-			properties: {
-				threshold_pct: {
-					type: "number",
-					description: "Usage threshold percentage (default 80)",
-				},
-				feature_id: {
-					type: "string",
-					description: "Optional: filter to a specific feature",
-				},
-			},
-			required: [],
-		},
-	},
-	{
-		name: "compare_plans",
-		description: "Compare two plans side-by-side showing differences in features and pricing.",
-		input_schema: {
-			type: "object" as const,
-			properties: {
-				plan_a: { type: "string", description: "First plan ID" },
-				plan_b: { type: "string", description: "Second plan ID" },
-			},
-			required: ["plan_a", "plan_b"],
-		},
-	},
-	{
-		name: "suggest_upgrade",
-		description:
-			"Analyze a customer's usage and suggest whether they should upgrade to a different plan based on usage patterns and overage costs.",
-		input_schema: {
-			type: "object" as const,
-			properties: {
-				customer_id: { type: "string", description: "The customer ID" },
-			},
-			required: ["customer_id"],
-		},
-	},
-	{
-		name: "customer_health_check",
-		description:
-			"Run a comprehensive health check on a customer. Analyzes usage trends, balance status, subscription health, and payment status to determine if the customer is healthy, at risk, or needs attention.",
-		input_schema: {
-			type: "object" as const,
-			properties: {
-				customer_id: { type: "string", description: "The customer ID" },
-			},
-			required: ["customer_id"],
-		},
-	},
 ];
 
 export const MUTATING_TOOLS = new Set([
+	"create_customer",
 	"create_balance",
 	"set_balance",
 	"track_usage",
