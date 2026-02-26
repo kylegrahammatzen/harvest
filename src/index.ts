@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { logger } from "hono/logger";
+import { bot } from "@/bot";
 import { getEnv } from "@/config";
 import { autumnWebhookRoutes } from "@/routes/autumn";
 import { connectRoutes } from "@/routes/connect";
@@ -22,7 +23,9 @@ app.route("/connect", connectRoutes);
 
 const env = getEnv();
 
-listWorkspaces()
+bot
+	.initialize()
+	.then(() => listWorkspaces())
 	.then((ids) =>
 		console.log(
 			`Autumn Slack bot running on port ${env.PORT} (${ids.length} workspace${ids.length === 1 ? "" : "s"})`,

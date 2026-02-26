@@ -72,7 +72,6 @@ settings:
     request_url: https://uncallused-fumiko-saturninely.ngrok-free.dev/webhooks/slack
     bot_events:
       - app_home_opened
-      - app_mention
       - assistant_thread_started
       - assistant_thread_context_changed
       - message.channels
