@@ -1,202 +1,95 @@
-import type { CardChild } from "chat";
-import { Actions, Card, LinkButton, CardText as Text } from "chat";
-import {
-	formatDate,
-	formatNumber,
-	formatRelativeTime,
-	formatUsageBar,
-	formatUsageRatio,
-} from "@/utils/formatters";
+import { Card, CardText as Text } from "chat";
 
-type AlertCardProps = {
-	dashboardUrl?: string;
-};
-
-type PlanChangedProps = AlertCardProps & {
+type BaseAlertProps = {
 	customerId: string;
 	customerName?: string;
+};
+
+type PlanAlertProps = BaseAlertProps & {
+	planName: string;
+};
+
+type PlanChangedProps = BaseAlertProps & {
 	fromPlan: string;
 	toPlan: string;
 	direction: "upgrade" | "downgrade" | "change";
 };
 
-export function PlanChangedCard({
-	customerId,
-	customerName,
-	fromPlan,
-	toPlan,
-	direction,
-	dashboardUrl,
-}: PlanChangedProps) {
-	const emoji = direction === "upgrade" ? "⬆️" : direction === "downgrade" ? "⬇️" : "🔄";
-	const label = direction.charAt(0).toUpperCase() + direction.slice(1);
-
-	const children: CardChild[] = [
-		Text(`*${customerName || customerId}* ${direction}d from ${fromPlan} to ${toPlan}.`),
-	];
-
-	if (dashboardUrl) {
-		children.push(Actions([LinkButton({ label: "View Details", url: dashboardUrl })]));
-	}
-
-	return Card({ title: `${emoji} Plan ${label}`, children });
-}
-
-type CanceledProps = AlertCardProps & {
-	customerId: string;
-	customerName?: string;
-	planName: string;
+type CanceledProps = PlanAlertProps & {
 	cancelsAt?: number;
 };
 
-export function SubscriptionCanceledCard({
-	customerId,
-	customerName,
-	planName,
-	cancelsAt,
-	dashboardUrl,
-}: CanceledProps) {
-	const children: CardChild[] = [
-		Text(
-			`*${customerName || customerId}* canceled ${planName}.${cancelsAt ? ` Access ends ${formatDate(cancelsAt)}.` : ""}`,
-		),
-	];
-
-	if (dashboardUrl) {
-		children.push(Actions([LinkButton({ label: "View Details", url: dashboardUrl })]));
-	}
-
-	return Card({ title: "❌ Subscription Canceled", children });
-}
-
-type TrialEndingProps = AlertCardProps & {
-	customerId: string;
-	customerName?: string;
-	planName: string;
-	trialEndsAt: number;
-	usage?: { featureId: string; used: number; total: number };
-};
-
-export function TrialEndingCard({
-	customerId,
-	customerName,
-	planName,
-	trialEndsAt,
-	usage,
-	dashboardUrl,
-}: TrialEndingProps) {
-	const children: CardChild[] = [
-		Text(
-			`*${customerName || customerId}* trial for ${planName} ends ${formatRelativeTime(trialEndsAt)}.`,
-		),
-	];
-
-	if (usage) {
-		children.push(Text(`Usage: ${formatUsageRatio(usage.used, usage.total)}`));
-	}
-
-	if (dashboardUrl) {
-		children.push(Actions([LinkButton({ label: "View Details", url: dashboardUrl })]));
-	}
-
-	return Card({ title: "⏳ Trial Ending", children });
-}
-
-type TrialConvertedProps = AlertCardProps & {
-	customerId: string;
-	customerName?: string;
-	planName: string;
-};
-
-export function TrialConvertedCard({
-	customerId,
-	customerName,
-	planName,
-	dashboardUrl,
-}: TrialConvertedProps) {
-	const children: CardChild[] = [Text(`*${customerName || customerId}* converted to ${planName}.`)];
-
-	if (dashboardUrl) {
-		children.push(Actions([LinkButton({ label: "View Details", url: dashboardUrl })]));
-	}
-
-	return Card({ title: "🎉 Trial Converted", children });
-}
-
-type UsageAlertProps = AlertCardProps & {
-	customerId: string;
-	customerName?: string;
+type UsageAlertProps = BaseAlertProps & {
 	featureId: string;
-	used: number;
-	total: number;
-	threshold: number;
-	nextResetAt?: number;
+	thresholdType: string;
 };
 
-export function UsageAlertCard({
-	customerId,
-	customerName,
-	featureId,
-	used,
-	total,
-	threshold: _threshold,
-	nextResetAt,
-	dashboardUrl,
-}: UsageAlertProps) {
-	const pct = Math.round((used / total) * 100);
-	const isLimitReached = used >= total;
-	const emoji = isLimitReached ? "🚨" : "📊";
-	const title = isLimitReached ? "Limit Reached" : `Usage Alert (${pct}%)`;
-
-	const children: CardChild[] = [
-		Text(
-			`*${customerName || customerId}* has ${isLimitReached ? "hit the" : `reached ${pct}% of`} *${featureId}* limit.`,
-		),
-		Text(`Usage: ${formatUsageRatio(used, total)} ${formatUsageBar(used, total)}`),
-	];
-
-	if (!isLimitReached) {
-		children.push(
-			Text(
-				`Remaining: ${formatNumber(total - used)}${nextResetAt ? ` (Resets ${formatDate(nextResetAt)})` : ""}`,
-			),
-		);
-	}
-
-	if (dashboardUrl) {
-		children.push(Actions([LinkButton({ label: "View Customer", url: dashboardUrl })]));
-	}
-
-	return Card({ title: `${emoji} ${title}`, children });
+function displayName(props: BaseAlertProps): string {
+	return props.customerName || props.customerId;
 }
 
-type BalanceAddedProps = AlertCardProps & {
-	customerId: string;
-	customerName?: string;
-	featureId: string;
-	amount: number;
-	newBalance?: number;
-};
+export function NewSubscriptionCard({ planName, ...props }: PlanAlertProps) {
+	return Card({
+		title: "🆕 New Subscription",
+		children: [Text(`*${displayName(props)}* subscribed to *${planName}*.`)],
+	});
+}
 
-export function BalanceAddedCard({
-	customerId,
-	customerName,
-	featureId,
-	amount,
-	newBalance,
-	dashboardUrl,
-}: BalanceAddedProps) {
-	const children: CardChild[] = [
-		Text(`*${customerName || customerId}* received +${formatNumber(amount)} *${featureId}*.`),
-	];
+export function PlanChangedCard({ fromPlan, toPlan, direction, ...props }: PlanChangedProps) {
+	const emoji = direction === "upgrade" ? "⬆️" : direction === "downgrade" ? "⬇️" : "🔄";
+	const label = direction.charAt(0).toUpperCase() + direction.slice(1);
 
-	if (newBalance !== undefined) {
-		children.push(Text(`New balance: ${formatNumber(newBalance)} remaining`));
-	}
+	return Card({
+		title: `${emoji} Plan ${label}`,
+		children: [Text(`*${displayName(props)}* ${direction}d from *${fromPlan}* to *${toPlan}*.`)],
+	});
+}
 
-	if (dashboardUrl) {
-		children.push(Actions([LinkButton({ label: "View Details", url: dashboardUrl })]));
-	}
+export function SubscriptionCanceledCard({ planName, cancelsAt, ...props }: CanceledProps) {
+	const endsText = cancelsAt
+		? ` Access ends ${new Date(cancelsAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}.`
+		: "";
 
-	return Card({ title: "🎁 Balance Added", children });
+	return Card({
+		title: "❌ Subscription Canceled",
+		children: [Text(`*${displayName(props)}* canceled *${planName}*.${endsText}`)],
+	});
+}
+
+export function SubscriptionRenewedCard({ planName, ...props }: PlanAlertProps) {
+	return Card({
+		title: "🔁 Subscription Renewed",
+		children: [Text(`*${displayName(props)}* renewed *${planName}*.`)],
+	});
+}
+
+export function TrialConvertedCard({ planName, ...props }: PlanAlertProps) {
+	return Card({
+		title: "🎉 Trial Converted",
+		children: [Text(`*${displayName(props)}* converted to *${planName}*.`)],
+	});
+}
+
+export function ExpiredCard({ planName, ...props }: PlanAlertProps) {
+	return Card({
+		title: "⏰ Subscription Expired",
+		children: [Text(`*${displayName(props)}*'s *${planName}* subscription has expired.`)],
+	});
+}
+
+export function PastDueCard({ planName, ...props }: PlanAlertProps) {
+	return Card({
+		title: "⚠️ Payment Past Due",
+		children: [Text(`*${displayName(props)}*'s payment for *${planName}* is past due.`)],
+	});
+}
+
+export function UsageAlertCard({ featureId, thresholdType, ...props }: UsageAlertProps) {
+	const label =
+		thresholdType === "limit_reached" ? "hit the limit for" : "approaching the limit for";
+
+	return Card({
+		title: thresholdType === "limit_reached" ? "🚨 Limit Reached" : "📊 Usage Alert",
+		children: [Text(`*${displayName(props)}* is ${label} *${featureId}*.`)],
+	});
 }
