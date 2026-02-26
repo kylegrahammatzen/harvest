@@ -1,0 +1,162 @@
+import Anthropic from "@anthropic-ai/sdk";
+import type { Message, Thread } from "chat";
+import { executeTool } from "@/agent/executor";
+import { agentTools, MUTATING_TOOLS } from "@/agent/tools";
+import { getEnv } from "@/config";
+import { getWorkspaceIdFromRaw } from "@/lib/slack";
+import { createAutumnClient } from "@/services/autumn";
+import { getWorkspace, isCommandChannel, listWorkspaces } from "@/services/workspace";
+
+const SYSTEM_PROMPT = `You are Autumn, an AI billing operations assistant for Autumn (useautumn.com).
+You help teams manage their customers, subscriptions, usage, and billing through Slack.
+
+You have access to tools that interact with the Autumn billing API. Use them to answer questions and perform actions.
+
+Important rules:
+- For MUTATING tools (create_balance, set_balance, track_usage, attach_plan, update_subscription, generate_checkout_url, setup_payment, update_customer, create_referral_code, redeem_referral_code), ALWAYS describe what you're about to do and return a confirmation request. Never execute these silently.
+- For READ tools, execute them directly and present the results clearly.
+- For COMPUTED tools, execute the underlying queries and synthesize the results.
+- Be concise. Format responses for Slack readability (use *bold*, \`code\`, bullet points).
+- When showing usage data, include relevant numbers and percentages.
+- If a tool returns an error, explain it clearly and suggest next steps.`;
+
+let _anthropic: Anthropic | null = null;
+
+function getAnthropic(): Anthropic {
+	if (!_anthropic) {
+		const apiKey = getEnv().ANTHROPIC_API_KEY;
+		if (!apiKey) throw new Error("ANTHROPIC_API_KEY not configured");
+		_anthropic = new Anthropic({ apiKey });
+	}
+	return _anthropic;
+}
+
+async function resolveWorkspaceId(raw: unknown): Promise<string | null> {
+	const explicitWorkspaceId = getWorkspaceIdFromRaw(raw);
+	if (explicitWorkspaceId) return explicitWorkspaceId;
+
+	const workspaceIds = await listWorkspaces();
+	if (workspaceIds.length === 1) return workspaceIds[0];
+	return null;
+}
+
+export async function handleAgentMention(thread: Thread, message: Message): Promise<void> {
+	const workspaceId = await resolveWorkspaceId(message.raw);
+	if (!workspaceId) {
+		await thread.post(
+			"Autumn could not resolve this workspace yet, so ask an admin to run `/connect` first.",
+		);
+		return;
+	}
+
+	const workspace = await getWorkspace(workspaceId);
+
+	if (!workspace) {
+		await thread.post(
+			"Autumn is not configured for this Slack workspace yet, so ask an admin to run `/connect`.",
+		);
+		return;
+	}
+
+	if (thread.channelId && !isCommandChannel(workspace, thread.channelId)) {
+		await thread.post(
+			"Autumn mentions only work in configured channels, so ask an admin to add this channel in settings.",
+		);
+		return;
+	}
+
+	await thread.subscribe();
+	await thread.post("I'm listening! Ask me anything about your billing data.");
+}
+
+export async function handleAgentMessage(thread: Thread, message: Message): Promise<void> {
+	const workspaceId = await resolveWorkspaceId(message.raw);
+	if (!workspaceId) {
+		await thread.post(
+			"Autumn could not resolve this workspace yet, so ask an admin to run `/connect` first.",
+		);
+		return;
+	}
+
+	const workspace = await getWorkspace(workspaceId);
+
+	if (!workspace) {
+		await thread.post(
+			"Autumn is not configured for this Slack workspace yet, so ask an admin to run `/connect`.",
+		);
+		return;
+	}
+	if (thread.channelId && !isCommandChannel(workspace, thread.channelId)) return;
+
+	const autumn = createAutumnClient(workspace);
+	const anthropic = getAnthropic();
+
+	try {
+		const messages: Anthropic.MessageParam[] = [{ role: "user", content: message.text }];
+
+		let response = await anthropic.messages.create({
+			model: "claude-sonnet-4-20250514",
+			max_tokens: 4096,
+			system: SYSTEM_PROMPT,
+			tools: agentTools,
+			messages,
+		});
+
+		while (response.stop_reason === "tool_use") {
+			const toolUseBlocks = response.content.filter(
+				(b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
+			);
+
+			const toolResults: Anthropic.ToolResultBlockParam[] = [];
+
+			for (const toolUse of toolUseBlocks) {
+				if (MUTATING_TOOLS.has(toolUse.name)) {
+					toolResults.push({
+						type: "tool_result",
+						tool_use_id: toolUse.id,
+						content: JSON.stringify({
+							status: "confirmation_required",
+							message:
+								"This is a mutating action. Describe what you're about to do and present the details to the user. They will need to confirm via a button before this executes.",
+							tool_name: toolUse.name,
+							params: toolUse.input,
+						}),
+					});
+				} else {
+					const result = await executeTool(
+						toolUse.name,
+						toolUse.input as Record<string, unknown>,
+						autumn,
+					);
+					toolResults.push({
+						type: "tool_result",
+						tool_use_id: toolUse.id,
+						content: JSON.stringify(result),
+					});
+				}
+			}
+
+			messages.push({ role: "assistant", content: response.content });
+			messages.push({ role: "user", content: toolResults });
+
+			response = await anthropic.messages.create({
+				model: "claude-sonnet-4-20250514",
+				max_tokens: 4096,
+				system: SYSTEM_PROMPT,
+				tools: agentTools,
+				messages,
+			});
+		}
+
+		const textBlocks = response.content.filter((b): b is Anthropic.TextBlock => b.type === "text");
+
+		const responseText = textBlocks.map((b) => b.text).join("\n");
+
+		if (responseText) {
+			await thread.post(responseText);
+		}
+	} catch (err) {
+		console.error("Agent error:", err);
+		await thread.post("Something went wrong processing your request. Check the logs for details.");
+	}
+}
