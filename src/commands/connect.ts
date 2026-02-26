@@ -9,14 +9,13 @@ export async function handleConnectCommand(
 	workspaceId: string,
 ): Promise<void> {
 	const existing = await getWorkspace(workspaceId);
-	if (existing) {
+	if (existing?.apiKey) {
 		const canManageConnection = existing.installedBy === event.user.userId;
-		const organizationName = existing.orgName || existing.orgSlug || "this organization";
 
 		if (!canManageConnection) {
 			await event.channel.postEphemeral(
 				event.user,
-				`Autumn is already connected to *${organizationName}*. Only the admin who connected it can reconnect. Ask them to run \`/disconnect\` first.`,
+				"Autumn is already connected. Only the admin who set it up can reconnect, ask them to run `/disconnect` first.",
 				{ fallbackToDM: true },
 			);
 			return;
@@ -24,7 +23,7 @@ export async function handleConnectCommand(
 
 		await event.channel.postEphemeral(
 			event.user,
-			`Autumn is already connected to *${organizationName}*. Run \`/disconnect\` first, then \`/connect\` again.`,
+			"Autumn is already connected. Run `/disconnect` first if you want to reconnect.",
 			{ fallbackToDM: true },
 		);
 		return;

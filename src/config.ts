@@ -15,10 +15,8 @@ const envSchema = z.object({
 		emptyStringToUndefined,
 		z.string().default("https://api.useautumn.com"),
 	),
-	AUTUMN_OAUTH_CLIENT_ID: z.preprocess(
-		emptyStringToUndefined,
-		z.string().default("hAWUopQqLnsSwuRgeRzIBzKslwXmQUSr"),
-	),
+	AUTUMN_OAUTH_CLIENT_ID: z.string().min(1, "AUTUMN_OAUTH_CLIENT_ID is required"),
+	AUTUMN_OAUTH_CLIENT_SECRET: z.string().min(1, "AUTUMN_OAUTH_CLIENT_SECRET is required"),
 	PORT: z.coerce.number().default(3000),
 	BASE_URL: z.string().default("http://localhost:3000"),
 });

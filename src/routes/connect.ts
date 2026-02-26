@@ -1,4 +1,5 @@
 import * as arctic from "arctic";
+import type { Context } from "hono";
 import { Hono } from "hono";
 import { getEnv } from "@/config";
 import { getRedis } from "@/lib/redis";
@@ -19,35 +20,14 @@ type ApiKeysResponse = {
 	error?: string;
 };
 
-const SCOPES = [
-	"customers:create",
-	"customers:read",
-	"customers:list",
-	"customers:update",
-	"customers:delete",
-	"features:create",
-	"features:read",
-	"features:list",
-	"features:update",
-	"features:delete",
-	"plans:create",
-	"plans:read",
-	"plans:list",
-	"plans:update",
-	"plans:delete",
-	"apiKeys:create",
-	"apiKeys:read",
-	"organisation:read",
-];
-
 const STATE_PREFIX = "autumn:oauth:state:";
 
 function getClient(): arctic.OAuth2Client {
 	const env = getEnv();
 	return new arctic.OAuth2Client(
 		env.AUTUMN_OAUTH_CLIENT_ID,
-		null,
-		`${env.BASE_URL}/connect/slack/callback`,
+		env.AUTUMN_OAUTH_CLIENT_SECRET,
+		`${env.BASE_URL}/slack/callback`,
 	);
 }
 
@@ -92,7 +72,7 @@ connectRoutes.get("/", async (c) => {
 		state,
 		arctic.CodeChallengeMethod.S256,
 		codeVerifier,
-		SCOPES,
+		[],
 	);
 	authorizeUrl.searchParams.set("prompt", "consent");
 
@@ -102,7 +82,7 @@ connectRoutes.get("/", async (c) => {
 	return c.redirect(authorizeUrl.toString());
 });
 
-connectRoutes.get("/slack/callback", async (c) => {
+export async function handleAutumnOAuthCallback(c: Context) {
 	const env = getEnv();
 	const code = c.req.query("code");
 	const state = c.req.query("state");
@@ -114,7 +94,10 @@ connectRoutes.get("/slack/callback", async (c) => {
 	}
 
 	if (!code || !state) {
-		return c.html(renderHtml("Invalid Callback", "Missing code or state, run /connect again."), 400);
+		return c.html(
+			renderHtml("Invalid Callback", "Missing code or state, run /connect again."),
+			400,
+		);
 	}
 
 	const redis = getRedis();
@@ -129,7 +112,10 @@ connectRoutes.get("/slack/callback", async (c) => {
 	try {
 		payload = JSON.parse(raw) as StatePayload;
 	} catch {
-		return c.html(renderHtml("Invalid Session", "Could not read the session, run /connect again."), 400);
+		return c.html(
+			renderHtml("Invalid Session", "Could not read the session, run /connect again."),
+			400,
+		);
 	}
 
 	try {
@@ -151,7 +137,10 @@ connectRoutes.get("/slack/callback", async (c) => {
 		if (!apiKeysRes.ok) {
 			const err = (await apiKeysRes.json().catch(() => ({}))) as ApiKeysResponse;
 			return c.html(
-				renderHtml("Key Provisioning Failed", err.error || "OAuth succeeded but key provisioning failed."),
+				renderHtml(
+					"Key Provisioning Failed",
+					err.error || "OAuth succeeded but key provisioning failed.",
+				),
 				400,
 			);
 		}
@@ -159,7 +148,10 @@ connectRoutes.get("/slack/callback", async (c) => {
 		const apiKeys = (await apiKeysRes.json()) as ApiKeysResponse;
 
 		if (!apiKeys.prod_key || !apiKeys.org_id) {
-			return c.html(renderHtml("Incomplete Response", "Autumn returned an incomplete key payload, try again."), 400);
+			return c.html(
+				renderHtml("Incomplete Response", "Autumn returned an incomplete key payload, try again."),
+				400,
+			);
 		}
 
 		const existing = await getWorkspace(payload.workspaceId);
@@ -181,7 +173,10 @@ connectRoutes.get("/slack/callback", async (c) => {
 		console.log(`Workspace connected: ${orgName}`);
 
 		return c.html(
-			renderHtml("Autumn Connected", "Autumn is now connected, return to Slack and mention @Autumn to get started."),
+			renderHtml(
+				"Autumn Connected",
+				"Autumn is now connected, return to Slack and mention @Autumn to get started.",
+			),
 			200,
 		);
 	} catch (err) {
@@ -190,6 +185,9 @@ connectRoutes.get("/slack/callback", async (c) => {
 			return c.html(renderHtml("Authorization Failed", `OAuth error: ${err.code}`), 400);
 		}
 		console.error("Autumn OAuth failed:", err);
-		return c.html(renderHtml("Connection Failed", "Something went wrong connecting to Autumn, try again."), 500);
+		return c.html(
+			renderHtml("Connection Failed", "Something went wrong connecting to Autumn, try again."),
+			500,
+		);
 	}
-});
+}
