@@ -1,6 +1,7 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { APIConnectionError, APIError, RateLimitError } from "@anthropic-ai/sdk";
 import type { Message, Thread } from "chat";
 import { Actions, Button, Card, CardText as Text } from "chat";
+import { parseApiError } from "@/agent/shared";
 import { executeTool } from "@/agent/executor";
 import { agentTools, MUTATING_TOOLS } from "@/agent/tools";
 import { getEnv } from "@/config";
@@ -8,6 +9,9 @@ import { getWorkspaceIdFromRaw } from "@/lib/slack";
 import { createAutumnClient } from "@/services/autumn";
 import type { WorkspaceConfig } from "@/services/workspace";
 import { getWorkspace, listWorkspaces } from "@/services/workspace";
+
+const MAX_TOOL_ITERATIONS = 8;
+const MAX_RECOVERY_DEPTH = 1;
 
 const SYSTEM_PROMPT = `You are Autumn, a billing ops assistant in Slack for Autumn (useautumn.com). You manage customers, subscriptions, usage, and billing through tools.
 
@@ -170,15 +174,22 @@ export async function runAgentWithContext(
 	thread: Thread<unknown>,
 	raw: unknown,
 	text: string,
+	recoveryDepth = 0,
 ): Promise<void> {
+	if (recoveryDepth > MAX_RECOVERY_DEPTH) {
+		console.warn(`Recovery depth ${recoveryDepth} exceeded limit, stopping`);
+		await thread.post("Automatic recovery failed. Please try the operation again or adjust the parameters.");
+		return;
+	}
+
 	const workspaceId = await resolveWorkspaceId(raw);
 	if (!workspaceId) return;
 
 	const workspace = await getWorkspace(workspaceId);
 	if (!workspace?.apiKey) return;
 
-	console.log(`Agent (recovery): "${text.slice(0, 80)}" (${workspace.orgName})`);
-	await runAgentLoopInner(thread, workspace, [{ role: "user", content: text }]);
+	console.log(`Agent (recovery depth=${recoveryDepth}): "${text.slice(0, 80)}" (${workspace.orgName})`);
+	await runAgentLoopInner(thread, workspace, [{ role: "user", content: text }], recoveryDepth);
 }
 
 async function runAgentLoop(thread: Thread, message: Message): Promise<void> {
@@ -200,6 +211,7 @@ async function runAgentLoopInner(
 	thread: Thread<unknown>,
 	workspace: WorkspaceConfig,
 	messages: Anthropic.MessageParam[],
+	recoveryDepth = 0,
 ): Promise<void> {
 	try {
 		const autumn = createAutumnClient(workspace);
@@ -208,6 +220,7 @@ async function runAgentLoopInner(
 		await thread.startTyping().catch(() => {});
 
 		let pendingMutation: PendingMutation | null = null;
+		let iterations = 0;
 
 		let response = await anthropic.messages.create({
 			model: "claude-sonnet-4-20250514",
@@ -218,14 +231,51 @@ async function runAgentLoopInner(
 		});
 
 		while (response.stop_reason === "tool_use") {
+			iterations++;
+			if (iterations > MAX_TOOL_ITERATIONS) {
+				console.warn(`Tool loop exceeded ${MAX_TOOL_ITERATIONS} iterations`, {
+					org: workspace.orgName,
+					thread: thread.id,
+				});
+				await thread.post(
+					"This request required too many steps. Try breaking it into smaller questions.",
+				);
+				return;
+			}
+
 			const toolUseBlocks = response.content.filter(
 				(b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
 			);
 
-			const toolResults: Anthropic.ToolResultBlockParam[] = [];
+			let mutatingBlock: Anthropic.ToolUseBlock | null = null;
+			const readBlocks: Anthropic.ToolUseBlock[] = [];
 
 			for (const toolUse of toolUseBlocks) {
 				if (MUTATING_TOOLS.has(toolUse.name)) {
+					mutatingBlock = toolUse;
+				} else {
+					readBlocks.push(toolUse);
+				}
+			}
+
+			const readResults = await Promise.all(
+				readBlocks.map(async (toolUse) => {
+					const result = await executeTool(
+						toolUse.name,
+						toolUse.input as Record<string, unknown>,
+						autumn,
+					);
+					return {
+						type: "tool_result" as const,
+						tool_use_id: toolUse.id,
+						content: JSON.stringify(result),
+					};
+				}),
+			);
+
+			const toolResults: Anthropic.ToolResultBlockParam[] = [];
+			for (const toolUse of toolUseBlocks) {
+				if (mutatingBlock && toolUse.id === mutatingBlock.id) {
 					pendingMutation = {
 						toolName: toolUse.name,
 						toolInput: toolUse.input as Record<string, unknown>,
@@ -242,16 +292,8 @@ async function runAgentLoopInner(
 						}),
 					});
 				} else {
-					const result = await executeTool(
-						toolUse.name,
-						toolUse.input as Record<string, unknown>,
-						autumn,
-					);
-					toolResults.push({
-						type: "tool_result",
-						tool_use_id: toolUse.id,
-						content: JSON.stringify(result),
-					});
+					const readResult = readResults.find((r) => r.tool_use_id === toolUse.id);
+					if (readResult) toolResults.push(readResult);
 				}
 			}
 
@@ -283,6 +325,7 @@ async function runAgentLoopInner(
 								value: JSON.stringify({
 									action: pendingMutation.toolName,
 									...pendingMutation.toolInput,
+									_recoveryDepth: recoveryDepth,
 								}),
 							}),
 							Button({ id: "cancel", label: "Cancel", style: "danger" }),
@@ -294,12 +337,20 @@ async function runAgentLoopInner(
 			await thread.post({ markdown: responseText });
 		}
 	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		console.error("Agent loop failed", {
-			error: message,
-			org: workspace.orgName,
-			thread: thread.id,
-		});
-		await thread.post("Something went wrong, try again later.");
+		if (err instanceof RateLimitError) {
+			await thread.post("I'm being rate limited, try again in a moment.");
+		} else if (err instanceof APIConnectionError) {
+			await thread.post("I couldn't reach the AI service, try again in a moment.");
+		} else if (err instanceof APIError && err.status >= 500) {
+			await thread.post("The AI service is temporarily unavailable, try again later.");
+		} else {
+			const message = parseApiError(err);
+			console.error("Agent loop failed", {
+				error: message,
+				org: workspace.orgName,
+				thread: thread.id,
+			});
+			await thread.post("Something went wrong, try again later.");
+		}
 	}
 }
