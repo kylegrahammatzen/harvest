@@ -1,10 +1,12 @@
 import type { Autumn, CustomerExpand, Range } from "autumn-js";
-import { parseApiError, str, num } from "@/agent/shared";
+import { mapCustomize, num, parseApiError, str } from "@/agent/shared";
+import { getSkillContent } from "@/agent/skills";
 
 type ToolResult = { success: true; data: unknown } | { success: false; error: string };
 type ToolParams = Record<string, unknown>;
 
 const toolHandlers: Record<string, (autumn: Autumn, p: ToolParams) => Promise<unknown>> = {
+	get_skill: (_autumn, p) => Promise.resolve(getSkillContent((p.skill_ids as string[]) || [])),
 	get_customer: (autumn, p) =>
 		autumn.customers.getOrCreate({
 			customerId: str(p.customer_id),
@@ -37,6 +39,17 @@ const toolHandlers: Record<string, (autumn: Autumn, p: ToolParams) => Promise<un
 		autumn.entities.get({ customerId: str(p.customer_id), entityId: str(p.entity_id) }),
 	get_billing_portal_url: (autumn, p) =>
 		autumn.billing.openCustomerPortal({ customerId: str(p.customer_id) }),
+	preview_attach: (autumn, p) => {
+		const params: Record<string, unknown> = {
+			customerId: str(p.customer_id),
+			planId: str(p.plan_id),
+		};
+		const customize = mapCustomize(p.customize);
+		if (customize) params.customize = customize;
+		return autumn.billing.previewAttach(
+			params as Parameters<typeof autumn.billing.previewAttach>[0],
+		);
+	},
 };
 
 export async function executeTool(
