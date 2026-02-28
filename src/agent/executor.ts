@@ -7,11 +7,17 @@ type ToolParams = Record<string, unknown>;
 
 const toolHandlers: Record<string, (autumn: Autumn, p: ToolParams) => Promise<unknown>> = {
 	get_skill: (_autumn, p) => Promise.resolve(getSkillContent((p.skill_ids as string[]) || [])),
-	get_customer: (autumn, p) =>
-		autumn.customers.getOrCreate({
-			customerId: str(p.customer_id),
+	get_customer: (autumn, p) => {
+		const id = str(p.customer_id);
+		if (id.includes("@"))
+			return Promise.reject(
+				new Error("customer_id must be the ID, not the email. Use list_customers to find the ID."),
+			);
+		return autumn.customers.getOrCreate({
+			customerId: id,
 			expand: p.expand as CustomerExpand[] | undefined,
-		}),
+		});
+	},
 	list_customers: (autumn, p) =>
 		autumn.customers.list({ limit: num(p.limit, 50), offset: num(p.offset, 0) }),
 	check_feature_access: (autumn, p) =>

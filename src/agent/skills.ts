@@ -67,6 +67,8 @@ After completing a billing action, suggest relevant next steps. For example: "Wa
 		description:
 			"Load for customer lookups, balance operations, billing portal, or when the user asks to do something you can't do directly.",
 		content: `Customer operations guidance:
+- CRITICAL: customer_id is NEVER an email address. After calling list_customers, use the "id" field from the response (e.g. "ayush", "cus_abc123"), not the email. Emails contain @ which is invalid in customer IDs.
+- If a customer already exists in list_customers results, NEVER create a new one. Use their existing ID.
 - Customers with a null external ID are normal — they were created in Autumn but haven't logged into the product yet. Their email serves as their identifier. Never suggest recreating or deleting these customers.
 - When presenting monetary amounts, format cents as dollars (e.g. 500 cents = $5.00).
 - When showing a customer's current plan, include the status and renewal date if available.
