@@ -476,8 +476,8 @@ async function runAgentLoopInner(
 			if (lastCustomerId) {
 				linkButtons.push(
 					LinkButton({
-						label: "View Customer",
-						url: `https://app.useautumn.com/customers/${encodeURIComponent(lastCustomerId)}`,
+						label: "View All Customers",
+						url: "https://app.useautumn.com/customers",
 					}),
 				);
 			}
