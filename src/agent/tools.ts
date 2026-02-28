@@ -318,7 +318,7 @@ const baseReadTools = [
 	),
 ];
 
-const billingFlowTools = [
+const billingFlowReadTools = [
 	defineTool(
 		"preview_attach",
 		"Preview cost of attaching a plan to a customer. Always call before attach_plan. Supports customize for custom pricing.",
@@ -329,6 +329,9 @@ const billingFlowTools = [
 		},
 		["customer_id", "plan_id"],
 	),
+];
+
+const billingFlowMutatingTools = [
 	defineTool(
 		"attach_plan",
 		"Subscribe a customer to a plan. Always preview_attach first. Set is_plan_switch=true if upgrading/downgrading. Use customize for custom pricing. See billing_flows skill for details.",
@@ -571,13 +574,13 @@ const baseMutatingTools = [
 	),
 ];
 
-const allMutating = [...baseMutatingTools, ...billingFlowTools, ...customPlanTools];
+const allMutating = [...baseMutatingTools, ...billingFlowMutatingTools, ...customPlanTools];
 
 export const MUTATING_TOOLS = new Set(allMutating.map((t) => t.name));
 
 export function getTools(skills: Set<string>): Anthropic.Tool[] {
 	const tools: Anthropic.Tool[] = [...baseReadTools, ...baseMutatingTools];
-	if (skills.has("billing_flows")) tools.push(...billingFlowTools);
+	if (skills.has("billing_flows")) tools.push(...billingFlowReadTools, ...billingFlowMutatingTools);
 	if (skills.has("custom_plans")) tools.push(...customPlanTools);
 	return tools;
 }

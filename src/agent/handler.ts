@@ -326,8 +326,10 @@ async function runAgentLoopInner(
 					readBlocks.push(toolUse);
 				}
 				const input = toolUse.input as Record<string, unknown>;
-				if (typeof input.customer_id === "string") lastCustomerId = input.customer_id;
-				if (typeof input.plan_id === "string") lastPlanId = input.plan_id;
+				if (typeof input.customer_id === "string" && !toolUse.name.startsWith("list_"))
+					lastCustomerId = input.customer_id;
+				if (typeof input.plan_id === "string" && !toolUse.name.startsWith("list_"))
+					lastPlanId = input.plan_id;
 				if (toolUse.name === "get_skill") {
 					for (const id of (input.skill_ids as string[]) || []) loadedSkills.add(id);
 				}
