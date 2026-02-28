@@ -3,7 +3,7 @@ import type { Message, Thread } from "chat";
 import { Actions, Button, Card, LinkButton, CardText as Text } from "chat";
 import { executeTool } from "@/agent/executor";
 import { parseApiError } from "@/agent/shared";
-import { agentTools, MUTATING_TOOLS } from "@/agent/tools";
+import { getTools, MUTATING_TOOLS } from "@/agent/tools";
 import { getEnv } from "@/config";
 import { getWorkspaceIdFromRaw } from "@/lib/slack";
 import { createAutumnClient } from "@/services/autumn";
@@ -280,6 +280,7 @@ async function runAgentLoopInner(
 		let iterations = 0;
 		let lastCustomerId: string | null = null;
 		let lastPlanId: string | null = null;
+		const loadedSkills = new Set<string>();
 		const systemPrompt = buildSystemPrompt(workspace);
 
 		const logLLM = (r: Anthropic.Message, ms: number) => {
@@ -296,7 +297,7 @@ async function runAgentLoopInner(
 			model: MODEL,
 			max_tokens: 4096,
 			system: systemPrompt,
-			tools: agentTools,
+			tools: getTools(loadedSkills),
 			messages,
 		});
 		logLLM(response, Date.now() - t0);
@@ -327,6 +328,9 @@ async function runAgentLoopInner(
 				const input = toolUse.input as Record<string, unknown>;
 				if (typeof input.customer_id === "string") lastCustomerId = input.customer_id;
 				if (typeof input.plan_id === "string") lastPlanId = input.plan_id;
+				if (toolUse.name === "get_skill") {
+					for (const id of (input.skill_ids as string[]) || []) loadedSkills.add(id);
+				}
 			}
 
 			const readResults = await Promise.all(
@@ -390,7 +394,7 @@ async function runAgentLoopInner(
 				model: MODEL,
 				max_tokens: 4096,
 				system: systemPrompt,
-				tools: agentTools,
+				tools: getTools(loadedSkills),
 				messages,
 			});
 			logLLM(response, Date.now() - t0);

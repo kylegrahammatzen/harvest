@@ -203,10 +203,10 @@ const customizeSchema = {
 	},
 };
 
-const readTools = [
+const baseReadTools = [
 	defineTool(
 		"get_skill",
-		"Load contextual guidance before responding. Call this for any non-trivial response. Pass one or more skill IDs. Skills are cached in conversation history — only load each once per thread.",
+		"Load contextual guidance and unlock additional tools before responding. Call this for any non-trivial response. Pass one or more skill IDs. Skills are cached in conversation history — only load each once per thread. Loading 'custom_plans' unlocks create_plan and update_plan. Loading 'billing_flows' unlocks attach_plan, preview_attach, and update_subscription.",
 		{
 			skill_ids: {
 				type: "array",
@@ -316,9 +316,12 @@ const readTools = [
 		{ customer_id: p.customer_id },
 		["customer_id"],
 	),
+];
+
+const billingFlowTools = [
 	defineTool(
 		"preview_attach",
-		"Preview the cost and line items that would result from attaching a plan to a customer. Returns prorated amounts, total due, and next cycle info. ALWAYS call this before attach_plan so the user can see exactly what will be charged before confirming. Supports customize to preview custom pricing for a specific customer.",
+		"Preview cost of attaching a plan to a customer. Always call before attach_plan. Supports customize for custom pricing.",
 		{
 			customer_id: p.customer_id,
 			plan_id: p.plan_id,
@@ -326,9 +329,145 @@ const readTools = [
 		},
 		["customer_id", "plan_id"],
 	),
+	defineTool(
+		"attach_plan",
+		"Subscribe a customer to a plan. Always preview_attach first. Set is_plan_switch=true if upgrading/downgrading. Use customize for custom pricing. See billing_flows skill for details.",
+		{
+			customer_id: p.customer_id,
+			plan_id: p.plan_id,
+			is_plan_switch: {
+				type: "boolean",
+				description:
+					"Set to true if the customer already has an active plan (upgrade/downgrade). Determines whether checkout link or direct charge is offered.",
+			},
+			customize: customizeSchema,
+			success_url: {
+				type: "string",
+				description: "URL to redirect to after the customer completes Stripe checkout",
+			},
+			invoice_mode: {
+				type: "object",
+				description:
+					"Create an invoice instead of charging the card on file. The 'Draft Invoice' button sets this automatically — do not set it yourself unless the user specifically asks for invoice billing.",
+				properties: {
+					enabled: { type: "boolean", description: "Enable invoice mode" },
+					enable_plan_immediately: {
+						type: "boolean",
+						description: "If true, activates the plan before the invoice is paid",
+					},
+					finalize: {
+						type: "boolean",
+						description:
+							"If true, finalizes and sends the invoice immediately. If false (default for Draft Invoice button), keeps it as a draft for manual review in Stripe.",
+					},
+				},
+				required: ["enabled"],
+			},
+		},
+		["customer_id", "plan_id"],
+	),
+	defineTool(
+		"update_subscription",
+		"Modify a subscription: change quantities, customize feature limits, or cancel/uncancel. See billing_flows skill for details.",
+		{
+			customer_id: p.customer_id,
+			plan_id: p.plan_id,
+			feature_quantities: {
+				type: "array",
+				items: {
+					type: "object",
+					properties: {
+						feature_id: { type: "string" },
+						quantity: { type: "number" },
+					},
+					required: ["feature_id", "quantity"],
+				},
+				description:
+					"New quantities for seat-based or quantity-based features (e.g. change seats from 5 to 10)",
+			},
+			cancel_action: {
+				type: "string",
+				enum: ["cancel_immediately", "cancel_end_of_cycle", "uncancel"],
+				description:
+					"cancel_end_of_cycle = cancel at period end (recommended default), cancel_immediately = revoke access now, uncancel = reverse a pending cancellation",
+			},
+			customize: customizeSchema,
+		},
+		["customer_id", "plan_id"],
+	),
 ];
 
-const mutatingTools = [
+const customPlanTools = [
+	defineTool(
+		"create_plan",
+		"Create a new plan. Call list_features first. Features auto-create if feature_type is set. See custom_plans skill for patterns.",
+		{
+			plan_id: {
+				type: "string",
+				description:
+					"Unique plan ID, lowercase with hyphens (e.g. 'pro-monthly', 'enterprise-annual').",
+			},
+			name: { type: "string", description: "Display name (e.g. 'Pro Plan', 'Enterprise Annual')." },
+			group: {
+				type: "string",
+				description:
+					"Plans in the same group are mutually exclusive (attaching one replaces the other). E.g. 'main' for base plans.",
+			},
+			description: { type: "string", description: "Optional plan description." },
+			add_on: {
+				type: "boolean",
+				description:
+					"If true, this plan can be purchased alongside other plans (e.g. credit packs, premium features). Default false.",
+			},
+			auto_enable: {
+				type: "boolean",
+				description:
+					"If true, auto-attached when a customer is created. Use only for free tiers. Default false.",
+			},
+			price: basePriceSchema,
+			items: {
+				type: "array",
+				items: planItemSchema,
+				description:
+					"Feature configurations. Each item defines what the customer gets and how overage is priced.",
+			},
+			free_trial: freeTrialSchema,
+		},
+		["plan_id", "name"],
+	),
+	defineTool(
+		"update_plan",
+		"Update a plan. Creates a new version (existing customers are grandfathered). Call get_plan first. See custom_plans skill for details.",
+		{
+			plan_id: p.plan_id,
+			name: { type: "string", description: "New display name." },
+			description: { type: "string", description: "New description." },
+			group: { type: "string", description: "New group." },
+			add_on: { type: "boolean", description: "Whether this is an add-on plan." },
+			auto_enable: { type: "boolean", description: "Whether to auto-attach on customer creation." },
+			archived: {
+				type: "boolean",
+				description: "Set true to archive the plan (cannot be attached to new customers).",
+			},
+			price: {
+				...basePriceSchema,
+				description: "New base price. Pass null to remove the base price.",
+			},
+			items: {
+				type: "array",
+				items: planItemSchema,
+				description: "New feature configurations. Replaces all existing items.",
+			},
+			free_trial: {
+				...freeTrialSchema,
+				description: "New trial config. Pass null to remove the trial.",
+			},
+		},
+		["plan_id"],
+	),
+];
+
+const baseMutatingTools = [
 	defineTool(
 		"create_customer",
 		"Create a new customer in Autumn. Use when the user explicitly asks to create/add a customer. Email is required; name is optional but recommended.",
@@ -388,139 +527,6 @@ const mutatingTools = [
 		["customer_id", "feature_id", "value"],
 	),
 	defineTool(
-		"attach_plan",
-		"Subscribe a customer to a plan. IMPORTANT: Always call preview_attach first to show the user what will be charged. After showing the preview, present the cost and ask the user to choose an action. The confirm buttons are added automatically: for new customers, 'Checkout Link' (generates a Stripe payment URL to share) or 'Draft Invoice'. For plan switches (customer already has an active plan), 'Confirm Charge' or 'Draft Invoice'. Set is_plan_switch=true when the customer already has a plan. Use customize to give a specific customer custom pricing or limits without creating a new plan.",
-		{
-			customer_id: p.customer_id,
-			plan_id: p.plan_id,
-			is_plan_switch: {
-				type: "boolean",
-				description:
-					"Set to true if the customer already has an active plan (upgrade/downgrade). Determines whether checkout link or direct charge is offered.",
-			},
-			customize: customizeSchema,
-			success_url: {
-				type: "string",
-				description: "URL to redirect to after the customer completes Stripe checkout",
-			},
-			invoice_mode: {
-				type: "object",
-				description:
-					"Create an invoice instead of charging the card on file. The 'Draft Invoice' button sets this automatically — do not set it yourself unless the user specifically asks for invoice billing.",
-				properties: {
-					enabled: { type: "boolean", description: "Enable invoice mode" },
-					enable_plan_immediately: {
-						type: "boolean",
-						description: "If true, activates the plan before the invoice is paid",
-					},
-					finalize: {
-						type: "boolean",
-						description:
-							"If true, finalizes and sends the invoice immediately. If false (default for Draft Invoice button), keeps it as a draft for manual review in Stripe.",
-					},
-				},
-				required: ["enabled"],
-			},
-		},
-		["customer_id", "plan_id"],
-	),
-	defineTool(
-		"create_plan",
-		"Create a new plan with pricing and feature configuration. Plans define what customers get and how much they pay. Always call list_features first to check existing features — if a feature doesn't exist, it will be auto-created when you reference it in items (provide feature_type for metered features).\n\nCommon patterns:\n- Flat fee: price: { amount: 49, interval: 'month' } with no items\n- Free allocation: items: [{ feature_id: 'credits', included: 1000, reset: { interval: 'month' } }]\n- Usage-based: items: [{ feature_id: 'api-calls', included: 1000, reset: { interval: 'month' }, price: { amount: 0.01, interval: 'month', billing_method: 'usage_based' } }]\n- Per-seat: items: [{ feature_id: 'seats', included: 5, price: { amount: 10, interval: 'month', billing_method: 'prepaid' } }]\n- Tiered: items: [{ feature_id: 'api-calls', included: 1000, reset: { interval: 'month' }, price: { tiers: [{ to: 10000, amount: 0.02 }, { to: 'inf', amount: 0.01 }], interval: 'month', billing_method: 'usage_based' } }]\n- Boolean gate: items: [{ feature_id: 'sso' }] (no price = included with plan)\n\nA plan can combine a flat base price with multiple items for a hybrid model.",
-		{
-			plan_id: {
-				type: "string",
-				description:
-					"Unique plan ID, lowercase with hyphens (e.g. 'pro-monthly', 'enterprise-annual').",
-			},
-			name: { type: "string", description: "Display name (e.g. 'Pro Plan', 'Enterprise Annual')." },
-			group: {
-				type: "string",
-				description:
-					"Plans in the same group are mutually exclusive (attaching one replaces the other). E.g. 'main' for base plans.",
-			},
-			description: { type: "string", description: "Optional plan description." },
-			add_on: {
-				type: "boolean",
-				description:
-					"If true, this plan can be purchased alongside other plans (e.g. credit packs, premium features). Default false.",
-			},
-			auto_enable: {
-				type: "boolean",
-				description:
-					"If true, auto-attached when a customer is created. Use only for free tiers. Default false.",
-			},
-			price: basePriceSchema,
-			items: {
-				type: "array",
-				items: planItemSchema,
-				description:
-					"Feature configurations. Each item defines what the customer gets and how overage is priced.",
-			},
-			free_trial: freeTrialSchema,
-		},
-		["plan_id", "name"],
-	),
-	defineTool(
-		"update_plan",
-		"Update an existing plan's configuration. Creates a new version — existing customers keep their current version (grandfathered), new customers get the updated version. Always call get_plan first to see the current configuration before making changes. Set archived=true to prevent new customers from subscribing.",
-		{
-			plan_id: p.plan_id,
-			name: { type: "string", description: "New display name." },
-			description: { type: "string", description: "New description." },
-			group: { type: "string", description: "New group." },
-			add_on: { type: "boolean", description: "Whether this is an add-on plan." },
-			auto_enable: { type: "boolean", description: "Whether to auto-attach on customer creation." },
-			archived: {
-				type: "boolean",
-				description: "Set true to archive the plan (cannot be attached to new customers).",
-			},
-			price: {
-				...basePriceSchema,
-				description: "New base price. Pass null to remove the base price.",
-			},
-			items: {
-				type: "array",
-				items: planItemSchema,
-				description: "New feature configurations. Replaces all existing items.",
-			},
-			free_trial: {
-				...freeTrialSchema,
-				description: "New trial config. Pass null to remove the trial.",
-			},
-		},
-		["plan_id"],
-	),
-	defineTool(
-		"update_subscription",
-		"Modify an existing subscription: change feature limits, seat/quantity counts, cancel, or uncancel. Use customize to override the plan's feature configuration for this specific customer (e.g. give them 1000 credits instead of 500). Use feature_quantities for prepaid quantity changes (seats). Use cancel_end_of_cycle for graceful cancellation (access until period ends). Use cancel_immediately to revoke access now. Use uncancel to reverse a pending cancellation.",
-		{
-			customer_id: p.customer_id,
-			plan_id: p.plan_id,
-			feature_quantities: {
-				type: "array",
-				items: {
-					type: "object",
-					properties: {
-						feature_id: { type: "string" },
-						quantity: { type: "number" },
-					},
-					required: ["feature_id", "quantity"],
-				},
-				description:
-					"New quantities for seat-based or quantity-based features (e.g. change seats from 5 to 10)",
-			},
-			cancel_action: {
-				type: "string",
-				enum: ["cancel_immediately", "cancel_end_of_cycle", "uncancel"],
-				description:
-					"cancel_end_of_cycle = cancel at period end (recommended default), cancel_immediately = revoke access now, uncancel = reverse a pending cancellation",
-			},
-			customize: customizeSchema,
-		},
-		["customer_id", "plan_id"],
-	),
-	defineTool(
 		"generate_checkout_url",
 		"Generate a standalone Stripe checkout URL for a customer and plan. Use this when you only need a checkout link without the full attach_plan flow (e.g. the user just wants a link to share). The customer does not need a payment method on file — they enter it during checkout.",
 		{ customer_id: p.customer_id, plan_id: p.plan_id },
@@ -565,5 +571,13 @@ const mutatingTools = [
 	),
 ];
 
-export const agentTools: Anthropic.Tool[] = [...readTools, ...mutatingTools];
-export const MUTATING_TOOLS = new Set(mutatingTools.map((t) => t.name));
+const allMutating = [...baseMutatingTools, ...billingFlowTools, ...customPlanTools];
+
+export const MUTATING_TOOLS = new Set(allMutating.map((t) => t.name));
+
+export function getTools(skills: Set<string>): Anthropic.Tool[] {
+	const tools: Anthropic.Tool[] = [...baseReadTools, ...baseMutatingTools];
+	if (skills.has("billing_flows")) tools.push(...billingFlowTools);
+	if (skills.has("custom_plans")) tools.push(...customPlanTools);
+	return tools;
+}
