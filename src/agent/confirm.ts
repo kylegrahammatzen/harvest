@@ -440,23 +440,26 @@ export async function handleConfirmAction(event: ActionEvent): Promise<void> {
 		return;
 	}
 
+	const edit = (text: string) =>
+		event.adapter.editMessage(event.threadId, event.messageId, { markdown: text });
+
 	let actionData: ActionData & { action: string };
 	try {
 		actionData = JSON.parse(event.value);
 	} catch {
-		await event.thread.post("Invalid action data.");
+		await edit("Invalid action data.");
 		return;
 	}
 
 	const workspaceId = getWorkspaceIdFromRaw(event.raw);
 	if (!workspaceId) {
-		await event.thread.post("Could not resolve workspace for this action.");
+		await edit("Could not resolve workspace for this action.");
 		return;
 	}
 
 	const workspace = await getWorkspace(workspaceId);
 	if (!workspace) {
-		await event.thread.post("Workspace not connected.");
+		await edit("Workspace not connected.");
 		return;
 	}
 
@@ -465,7 +468,7 @@ export async function handleConfirmAction(event: ActionEvent): Promise<void> {
 	const handler = actions[actionData.action];
 
 	if (!handler) {
-		await event.thread.post(`Unknown action: ${actionData.action}`);
+		await edit(`Unknown action: ${actionData.action}`);
 		return;
 	}
 
@@ -474,7 +477,7 @@ export async function handleConfirmAction(event: ActionEvent): Promise<void> {
 		return v == null || v === "";
 	});
 	if (missing) {
-		await event.thread.post(`Invalid ${actionData.action} payload.`);
+		await edit(`Invalid ${actionData.action} payload.`);
 		return;
 	}
 

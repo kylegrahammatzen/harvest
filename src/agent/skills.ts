@@ -49,7 +49,8 @@ Important rules for items:
   - For PLAN SWITCHES (customer already has a plan, set is_plan_switch=true): "Confirm Charge" or "Draft Invoice"
 - The "Draft Invoice" button creates an invoice in Stripe with finalize=false so they can review it before sending.
 - invoice_mode options: enabled=true activates invoice billing, finalize=true sends immediately, enable_plan_immediately=true activates the plan before the invoice is paid.
-- Use customize on attach_plan to give a specific customer custom pricing, feature limits, or trial without creating a separate plan.
+- Use customize on attach_plan or update_subscription to give a specific customer custom pricing, feature limits, or additional features without creating a separate plan.
+- When the user asks to add a feature to a customer's plan that isn't in the plan's defaults, call list_features first to confirm the feature exists in Autumn, then use customize to add it.
 - When attaching a plan where the customer already has an active plan in the same group, set is_plan_switch=true.
 - generate_checkout_url is for standalone checkout links without the full attach flow.
 - setup_payment generates a link for customers to add/update their payment method.
