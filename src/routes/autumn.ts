@@ -112,9 +112,6 @@ async function findWorkspaceForEvent(event: AutumnWebhookEvent) {
 			return ws;
 		}
 	}
-	if (workspaceIds.length === 1) {
-		return getWorkspace(workspaceIds[0]);
-	}
 	return null;
 }
 
