@@ -8,7 +8,6 @@ const envSchema = z.object({
 	SLACK_CLIENT_ID: z.string().optional(),
 	SLACK_CLIENT_SECRET: z.string().optional(),
 	SLACK_SIGNING_SECRET: z.string().optional(),
-	SLACK_BOT_TOKEN: z.string().optional(),
 	ENCRYPTION_KEY: z.string().min(1, "ENCRYPTION_KEY is required for storing tenant credentials"),
 	ANTHROPIC_API_KEY: z.string().optional(),
 	AUTUMN_BACKEND_URL: z.preprocess(

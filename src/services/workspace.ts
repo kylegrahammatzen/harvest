@@ -16,6 +16,11 @@ export type WorkspaceConfig = {
 };
 
 const KEY_PREFIX = "autumn:workspace:";
+const ENCRYPTED_PATTERN = /^[0-9a-f]{24}:[0-9a-f]+$/;
+
+function isEncrypted(value: string): boolean {
+	return ENCRYPTED_PATTERN.test(value);
+}
 
 export async function getWorkspace(workspaceId: string): Promise<WorkspaceConfig | null> {
 	const redis = getRedis();
@@ -27,6 +32,11 @@ export async function getWorkspace(workspaceId: string): Promise<WorkspaceConfig
 
 	if (workspace.apiKey) {
 		workspace.apiKey = await decrypt(workspace.apiKey, encKey);
+	}
+	if (workspace.slackBotToken) {
+		workspace.slackBotToken = isEncrypted(workspace.slackBotToken)
+			? await decrypt(workspace.slackBotToken, encKey)
+			: workspace.slackBotToken;
 	}
 	if (workspace.webhookSecret) {
 		workspace.webhookSecret = await decrypt(workspace.webhookSecret, encKey);
@@ -42,6 +52,7 @@ export async function saveWorkspace(workspace: WorkspaceConfig): Promise<void> {
 	const toStore: WorkspaceConfig = {
 		...workspace,
 		apiKey: workspace.apiKey ? await encrypt(workspace.apiKey, encKey) : null,
+		slackBotToken: workspace.slackBotToken ? await encrypt(workspace.slackBotToken, encKey) : null,
 		webhookSecret: workspace.webhookSecret ? await encrypt(workspace.webhookSecret, encKey) : null,
 	};
 

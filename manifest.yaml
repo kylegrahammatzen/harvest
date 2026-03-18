@@ -31,20 +31,19 @@ features:
     always_online: true
   slash_commands:
     - command: /connect
-      url: https://uncallused-fumiko-saturninely.ngrok-free.dev/webhooks/slack
+      url: https://YOUR_DOMAIN/webhooks/slack
       description: Connect your Autumn billing account
       usage_hint: Autumn
       should_escape: false
     - command: /disconnect
-      url: https://uncallused-fumiko-saturninely.ngrok-free.dev/webhooks/slack
+      url: https://YOUR_DOMAIN/webhooks/slack
       description: Disconnect Autumn from this workspace
       usage_hint: Autumn
       should_escape: false
 
 oauth_config:
   redirect_urls:
-    - https://uncallused-fumiko-saturninely.ngrok-free.dev/slack/callback
-    - http://localhost:3000/slack/callback
+    - https://YOUR_DOMAIN/slack/callback
   scopes:
     bot:
       # Messaging
@@ -69,7 +68,7 @@ oauth_config:
 
 settings:
   event_subscriptions:
-    request_url: https://uncallused-fumiko-saturninely.ngrok-free.dev/webhooks/slack
+    request_url: https://YOUR_DOMAIN/webhooks/slack
     bot_events:
       - app_home_opened
       - assistant_thread_started
@@ -80,7 +79,7 @@ settings:
       - message.mpim
   interactivity:
     is_enabled: true
-    request_url: https://uncallused-fumiko-saturninely.ngrok-free.dev/webhooks/slack
+    request_url: https://YOUR_DOMAIN/webhooks/slack
   org_deploy_enabled: false
   socket_mode_enabled: false
   token_rotation_enabled: false

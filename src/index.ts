@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { logger } from "hono/logger";
 import { bot } from "@/bot";
 import { getEnv } from "@/config";
+import { flushStaleLocks } from "@/lib/redis";
 import { autumnWebhookRoutes } from "@/routes/autumn";
 import { connectRoutes } from "@/routes/connect";
 import { installRoutes } from "@/routes/install";
@@ -25,7 +26,11 @@ const env = getEnv();
 
 bot
 	.initialize()
-	.then(() => listWorkspaces())
+	.then(() => flushStaleLocks())
+	.then((flushed) => {
+		if (flushed > 0) console.log(`startup flushed=${flushed} stale locks`);
+		return listWorkspaces();
+	})
 	.then((ids) =>
 		console.log(
 			`Autumn Slack bot running on port ${env.PORT} (${ids.length} workspace${ids.length === 1 ? "" : "s"})`,

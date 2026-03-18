@@ -30,9 +30,10 @@ src/
 │   └── disconnect.ts  /disconnect
 ├── agent/
 │   ├── handler.ts     @Autumn mention -> Claude agent loop + confirm cards
-│   ├── tools.ts       Tool definitions (26 tools)
+│   ├── tools.ts       Tool definitions (defineTool helper, read/mutating split)
 │   ├── executor.ts    Tool execution (read + computed)
-│   └── confirm.ts     Confirmation execution (10 mutating tools)
+│   ├── confirm.ts     Confirmation execution (action registry + successCard)
+│   └── shared.ts      parseApiError, str, num utilities
 ├── cards/
 │   └── alert.ts       Webhook alert cards
 ├── services/

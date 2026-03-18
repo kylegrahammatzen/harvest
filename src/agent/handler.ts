@@ -1,32 +1,69 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { APIConnectionError, APIError, RateLimitError } from "@anthropic-ai/sdk";
 import type { Message, Thread } from "chat";
-import { Actions, Button, Card, CardText as Text } from "chat";
+import { Actions, Button, Card, LinkButton, CardText as Text } from "chat";
 import { executeTool } from "@/agent/executor";
-import { agentTools, MUTATING_TOOLS } from "@/agent/tools";
+import { parseApiError } from "@/agent/shared";
+import { getTools, MUTATING_TOOLS } from "@/agent/tools";
 import { getEnv } from "@/config";
 import { getWorkspaceIdFromRaw } from "@/lib/slack";
 import { createAutumnClient } from "@/services/autumn";
 import type { WorkspaceConfig } from "@/services/workspace";
-import { getWorkspace, listWorkspaces } from "@/services/workspace";
+import { getWorkspace } from "@/services/workspace";
 
-const SYSTEM_PROMPT = `You are Autumn, a billing ops assistant in Slack for Autumn (useautumn.com). You manage customers, subscriptions, usage, and billing through tools.
+const MAX_TOOL_ITERATIONS = 8;
+const MAX_RECOVERY_DEPTH = 1;
+
+const MODEL = "claude-opus-4-6";
+
+// Tracks threads with an active agent loop so we can notify them on shutdown.
+// Without this, hot-reloads leave Slack showing "Typing..." with no response.
+const activeThreads = new Set<Thread<unknown>>();
+
+function handleShutdown() {
+	if (activeThreads.size === 0) return;
+	console.log(`shutdown: notifying ${activeThreads.size} active thread(s)`);
+	const posts = [...activeThreads].map((thread) =>
+		thread.post("Autumn restarted, please try again.").catch(() => {}),
+	);
+	activeThreads.clear();
+	// Wait for posts to reach Slack before exiting, with a 3s hard timeout
+	Promise.allSettled(posts).then(() => process.exit(0));
+	setTimeout(() => process.exit(1), 3000);
+}
+
+process.on("SIGTERM", handleShutdown);
+process.on("SIGINT", handleShutdown);
+
+function buildSystemPrompt(workspace: WorkspaceConfig): string {
+	return `You are Autumn, a billing ops assistant in Slack for Autumn (useautumn.com). You manage customers, subscriptions, usage, and billing through tools.
+
+Connected to: ${workspace.orgName} (${workspace.orgSlug})
 
 Rules:
 - For mutating tools, write a short summary of what you'll do. Confirm/Cancel buttons appear automatically — never ask the user to confirm in text.
 - For read tools, run them and present results directly.
 - If a tool errors, explain clearly and suggest next steps.
-- When a user refers to a customer by name or email (not an exact ID), use list_customers first and search the results by name/email to find the match. Then use the exact customer ID from the API response for any further tool calls. Never guess or construct customer IDs — always use the exact value returned by the API.
-- When a user refers to a plan by name, use list_plans to find the correct plan ID before using it in mutations.
+- When the user asks to retry or try again, always re-call the relevant tools. Never rely on previous error messages in the conversation — the underlying issue may have been fixed.
+- When a user refers to a customer by name or email (not an exact ID), use list_customers first, then use the exact customer ID from the response. Never guess customer IDs.
+- When a user refers to a plan by name, use list_plans to find the correct plan ID first.
 - When multiple customers match a name, list them with IDs and ask which one.
-- Customers with a null external ID are normal — they were created in Autumn but haven't logged into the product yet. Their email serves as their identifier. Never suggest recreating or deleting these customers.
 - If someone asks what you can do, give a brief 2-3 sentence overview, not a full list.
 
 Formatting:
-- This is Slack. Use *bold*, \`code\` for IDs/values, and • for lists.
-- Always wrap email addresses in backticks like \`user@example.com\`. Slack mangles bare @ symbols into broken mentions.
-- No emojis ever.
-- Be concise. No filler like "Sure!", "Great question!", "I'd be happy to help!".
-- When presenting customer info, only show relevant fields — skip empty or null ones.`;
+- This is Slack. Use *bold* for emphasis, backticks for IDs/values/emails, and • for bullet lists.
+- No emojis. Be concise. No filler like "Sure!", "Great question!", "I'd be happy to help!".
+- NEVER put app.useautumn.com URLs in your text. Slack mangles @ in URLs. Link buttons for View Customer, View Plan, etc. are added automatically below your response.
+- For other links, use standard markdown: [label](url).
+
+Skills — load guidance before responding:
+- Before responding to any non-trivial message, call get_skill to load relevant guidance. Skip ONLY for trivial one-liners.
+- Load "response_formatting" for any response that presents info, compares items, or walks through steps.
+- Load "custom_plans" when creating, updating, or customizing plans/pricing.
+- Load "billing_flows" when attaching plans, previewing costs, invoices, or checkout.
+- Load "customer_ops" for customer lookups, balance ops, billing portal, or "can't do X" scenarios.
+- You can load multiple skills in one call: get_skill(["customer_ops", "response_formatting"]).
+- Skills are cached in conversation history — only load each skill once per thread.`;
+}
 
 let _anthropic: Anthropic | null = null;
 
@@ -40,12 +77,14 @@ function getAnthropic(): Anthropic {
 }
 
 async function resolveWorkspaceId(raw: unknown): Promise<string | null> {
-	const explicitWorkspaceId = getWorkspaceIdFromRaw(raw);
-	if (explicitWorkspaceId) return explicitWorkspaceId;
-
-	const workspaceIds = await listWorkspaces();
-	if (workspaceIds.length === 1) return workspaceIds[0];
-	return null;
+	const workspaceId = getWorkspaceIdFromRaw(raw);
+	if (!workspaceId) {
+		const rawObj = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+		console.warn(
+			`workspace_resolve err=not_found keys=${Object.keys(rawObj).join(",") || "none"} team=${rawObj.team ?? "null"} team_id=${rawObj.team_id ?? "null"}`,
+		);
+	}
+	return workspaceId;
 }
 
 export async function handleAgentMention(thread: Thread, message: Message): Promise<void> {
@@ -60,6 +99,7 @@ export async function handleAgentMention(thread: Thread, message: Message): Prom
 	await thread.subscribe();
 
 	if (!workspace) {
+		console.warn(`workspace_lookup err=not_found id=${workspaceId} channel=${thread.channelId}`);
 		await thread.post("Ask an admin to run `/connect` to set up Autumn for this workspace.");
 		return;
 	}
@@ -112,33 +152,48 @@ async function buildMessages(
 	message: Message,
 	anthropic: Anthropic,
 ): Promise<Anthropic.MessageParam[]> {
-	const history: { role: "user" | "assistant"; content: string }[] = [];
+	const raw: { role: "user" | "assistant"; content: string }[] = [];
 
 	for await (const msg of thread.allMessages) {
 		if (!msg.text.trim()) continue;
-		history.push({
+		raw.push({
 			role: msg.author.isMe ? "assistant" : "user",
 			content: msg.text,
 		});
-		if (history.length >= MAX_HISTORY) break;
+		if (raw.length >= MAX_HISTORY) break;
 	}
 
-	if (history.length <= 1) {
+	if (raw.length <= 1) {
 		return [{ role: "user", content: message.text }];
 	}
+
+	// Keep only user messages and assistant messages that aren't error responses.
+	// For the last user message, always include it fresh (it's the current request).
+	const history = raw.map((msg) => {
+		if (msg.role === "assistant") {
+			return {
+				role: msg.role,
+				content: `[Previous response — may be outdated, always re-check with tools]\n${msg.content}`,
+			};
+		}
+		return msg;
+	});
 
 	if (history.length > SUMMARIZE_THRESHOLD) {
 		const older = history.slice(0, -3);
 		const recent = history.slice(-3);
-		const transcript = older.map((m) => `${m.role}: ${m.content}`).join("\n");
+		const transcript = older
+			.filter((m) => m.role === "user")
+			.map((m) => m.content)
+			.join("\n");
 
 		const summary = await anthropic.messages.create({
-			model: "claude-haiku-4-5-20251001",
+			model: MODEL,
 			max_tokens: 512,
 			messages: [
 				{
 					role: "user",
-					content: `Summarize this conversation in 2-3 sentences. Preserve all exact customer IDs, plan IDs, and email addresses mentioned. Focus on what was discussed and any pending requests:\n\n${transcript}`,
+					content: `Summarize what the user asked for in 2-3 sentences. Preserve all exact customer IDs, plan IDs, and email addresses mentioned. Only include what the user requested, not any bot responses or errors:\n\n${transcript}`,
 				},
 			],
 		});
@@ -149,10 +204,10 @@ async function buildMessages(
 			.join("");
 
 		return [
-			{ role: "user", content: `[Previous conversation summary: ${summaryText}]` },
+			{ role: "user", content: `[Previous conversation context: ${summaryText}]` },
 			{
 				role: "assistant",
-				content: "Understood, I have the context from our previous conversation.",
+				content: "Got it.",
 			},
 			...recent,
 		];
@@ -170,15 +225,25 @@ export async function runAgentWithContext(
 	thread: Thread<unknown>,
 	raw: unknown,
 	text: string,
+	recoveryDepth = 0,
 ): Promise<void> {
+	if (recoveryDepth > MAX_RECOVERY_DEPTH) {
+		console.warn(`Recovery depth ${recoveryDepth} exceeded limit, stopping`);
+		await thread.post(
+			"Automatic recovery failed. Please try the operation again or adjust the parameters.",
+		);
+		return;
+	}
+
 	const workspaceId = await resolveWorkspaceId(raw);
 	if (!workspaceId) return;
 
 	const workspace = await getWorkspace(workspaceId);
 	if (!workspace?.apiKey) return;
 
-	console.log(`Agent (recovery): "${text.slice(0, 80)}" (${workspace.orgName})`);
-	await runAgentLoopInner(thread, workspace, [{ role: "user", content: text }]);
+	const rid = `recovery-${recoveryDepth}`;
+	console.log(`agent rid=${rid} org=${workspace.orgSlug} msg="${text.slice(0, 80)}"`);
+	await runAgentLoopInner(thread, workspace, [{ role: "user", content: text }], recoveryDepth, rid);
 }
 
 async function runAgentLoop(thread: Thread, message: Message): Promise<void> {
@@ -189,18 +254,22 @@ async function runAgentLoop(thread: Thread, message: Message): Promise<void> {
 	if (!workspace) return;
 
 	const text = message.text.length > 80 ? `${message.text.slice(0, 80)}...` : message.text;
-	console.log(`Agent: "${text}" (${workspace.orgName})`);
+	const rid = message.id;
+	console.log(`agent rid=${rid} org=${workspace.orgSlug} msg="${text}"`);
 
 	const anthropic = getAnthropic();
 	const messages = await buildMessages(thread, message, anthropic);
-	await runAgentLoopInner(thread, workspace, messages);
+	await runAgentLoopInner(thread, workspace, messages, 0, rid);
 }
 
 async function runAgentLoopInner(
 	thread: Thread<unknown>,
 	workspace: WorkspaceConfig,
 	messages: Anthropic.MessageParam[],
+	recoveryDepth = 0,
+	rid = "recovery",
 ): Promise<void> {
+	activeThreads.add(thread);
 	try {
 		const autumn = createAutumnClient(workspace);
 		const anthropic = getAnthropic();
@@ -208,24 +277,96 @@ async function runAgentLoopInner(
 		await thread.startTyping().catch(() => {});
 
 		let pendingMutation: PendingMutation | null = null;
+		let iterations = 0;
+		let lastCustomerId: string | null = null;
+		let lastPlanId: string | null = null;
+		const loadedSkills = new Set<string>();
+		const systemPrompt = buildSystemPrompt(workspace);
 
+		const logLLM = (r: Anthropic.Message, ms: number) => {
+			const tools = r.content
+				.filter((b) => b.type === "tool_use")
+				.map((b) => (b as Anthropic.ToolUseBlock).name);
+			console.log(
+				`llm rid=${rid} stop=${r.stop_reason} in=${r.usage.input_tokens} out=${r.usage.output_tokens} ms=${ms}${tools.length ? ` tools=${tools.join(",")}` : ""}`,
+			);
+		};
+
+		let t0 = Date.now();
 		let response = await anthropic.messages.create({
-			model: "claude-sonnet-4-20250514",
+			model: MODEL,
 			max_tokens: 4096,
-			system: SYSTEM_PROMPT,
-			tools: agentTools,
+			system: systemPrompt,
+			tools: getTools(loadedSkills),
 			messages,
 		});
+		logLLM(response, Date.now() - t0);
 
 		while (response.stop_reason === "tool_use") {
+			iterations++;
+			if (iterations > MAX_TOOL_ITERATIONS) {
+				console.warn(`agent rid=${rid} err=tool_loop_exceeded iterations=${iterations}`);
+				await thread.post(
+					"This request required too many steps. Try breaking it into smaller questions.",
+				);
+				return;
+			}
+
 			const toolUseBlocks = response.content.filter(
 				(b): b is Anthropic.ToolUseBlock => b.type === "tool_use",
 			);
 
-			const toolResults: Anthropic.ToolResultBlockParam[] = [];
+			let mutatingBlock: Anthropic.ToolUseBlock | null = null;
+			const readBlocks: Anthropic.ToolUseBlock[] = [];
 
 			for (const toolUse of toolUseBlocks) {
 				if (MUTATING_TOOLS.has(toolUse.name)) {
+					mutatingBlock = toolUse;
+				} else {
+					readBlocks.push(toolUse);
+				}
+				const input = toolUse.input as Record<string, unknown>;
+				if (typeof input.customer_id === "string" && !toolUse.name.startsWith("list_"))
+					lastCustomerId = input.customer_id;
+				if (typeof input.plan_id === "string" && !toolUse.name.startsWith("list_"))
+					lastPlanId = input.plan_id;
+				if (toolUse.name === "get_skill") {
+					for (const id of (input.skill_ids as string[]) || []) loadedSkills.add(id);
+				}
+			}
+
+			const readResults = await Promise.all(
+				readBlocks.map(async (toolUse) => {
+					const params = toolUse.input as Record<string, unknown>;
+					const paramStr = Object.entries(params)
+						.map(([k, v]) => `${k}=${v}`)
+						.join(" ");
+					const toolStart = Date.now();
+					const result = await executeTool(toolUse.name, params, autumn);
+					const toolMs = Date.now() - toolStart;
+					if (result.success) {
+						console.log(`tool rid=${rid} ${toolUse.name} ok ms=${toolMs} ${paramStr}`);
+					} else {
+						console.warn(
+							`tool rid=${rid} ${toolUse.name} err="${result.error}" ms=${toolMs} ${paramStr}`,
+						);
+					}
+					return {
+						type: "tool_result" as const,
+						tool_use_id: toolUse.id,
+						content: JSON.stringify(result),
+					};
+				}),
+			);
+
+			const toolResults: Anthropic.ToolResultBlockParam[] = [];
+			for (const toolUse of toolUseBlocks) {
+				if (mutatingBlock && toolUse.id === mutatingBlock.id) {
+					const params = toolUse.input as Record<string, unknown>;
+					const paramStr = Object.entries(params)
+						.map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`)
+						.join(" ");
+					console.log(`mutation rid=${rid} ${toolUse.name} ${paramStr}`);
 					pendingMutation = {
 						toolName: toolUse.name,
 						toolInput: toolUse.input as Record<string, unknown>,
@@ -242,64 +383,135 @@ async function runAgentLoopInner(
 						}),
 					});
 				} else {
-					const result = await executeTool(
-						toolUse.name,
-						toolUse.input as Record<string, unknown>,
-						autumn,
-					);
-					toolResults.push({
-						type: "tool_result",
-						tool_use_id: toolUse.id,
-						content: JSON.stringify(result),
-					});
+					const readResult = readResults.find((r) => r.tool_use_id === toolUse.id);
+					if (readResult) toolResults.push(readResult);
 				}
 			}
 
 			messages.push({ role: "assistant", content: response.content });
 			messages.push({ role: "user", content: toolResults });
 
+			t0 = Date.now();
 			response = await anthropic.messages.create({
-				model: "claude-sonnet-4-20250514",
+				model: MODEL,
 				max_tokens: 4096,
-				system: SYSTEM_PROMPT,
-				tools: agentTools,
+				system: systemPrompt,
+				tools: getTools(loadedSkills),
 				messages,
 			});
+			logLLM(response, Date.now() - t0);
 		}
 
 		const textBlocks = response.content.filter((b): b is Anthropic.TextBlock => b.type === "text");
 		const responseText = textBlocks.map((b) => b.text).join("\n");
 
 		if (responseText && pendingMutation) {
-			await thread.post(
-				Card({
-					children: [
-						Text(responseText),
-						Actions([
+			const actionPayload = {
+				action: pendingMutation.toolName,
+				...pendingMutation.toolInput,
+				_recoveryDepth: recoveryDepth,
+			};
+
+			const invoiceButton = Button({
+				id: "confirm_invoice",
+				label: "Draft Invoice",
+				value: JSON.stringify({
+					...actionPayload,
+					invoice_mode: { enabled: true, finalize: false },
+				}),
+			});
+
+			const cancelButton = Button({
+				id: "cancel",
+				label: "Cancel",
+				style: "danger",
+				value: JSON.stringify(actionPayload),
+			});
+
+			let buttons: ReturnType<typeof Button>[];
+			if (pendingMutation.toolName === "attach_plan") {
+				const isPlanSwitch = !!(pendingMutation.toolInput as Record<string, unknown>)
+					.is_plan_switch;
+
+				buttons = isPlanSwitch
+					? [
 							Button({
 								id: "confirm",
-								label: "Confirm",
+								label: "Confirm Charge",
 								style: "primary",
-								value: JSON.stringify({
-									action: pendingMutation.toolName,
-									...pendingMutation.toolInput,
-								}),
+								value: JSON.stringify(actionPayload),
 							}),
-							Button({ id: "cancel", label: "Cancel", style: "danger" }),
-						]),
-					],
+							invoiceButton,
+							cancelButton,
+						]
+					: [
+							Button({
+								id: "confirm",
+								label: "Checkout Link",
+								style: "primary",
+								value: JSON.stringify(actionPayload),
+							}),
+							invoiceButton,
+							cancelButton,
+						];
+			} else {
+				buttons = [
+					Button({
+						id: "confirm",
+						label: "Confirm",
+						style: "primary",
+						value: JSON.stringify(actionPayload),
+					}),
+					cancelButton,
+				];
+			}
+
+			await thread.post(
+				Card({
+					children: [Text(responseText), Actions(buttons)],
 				}),
 			);
 		} else if (responseText) {
-			await thread.post({ markdown: responseText });
+			const linkButtons: ReturnType<typeof LinkButton>[] = [];
+			if (lastCustomerId) {
+				linkButtons.push(
+					LinkButton({
+						label: "View All Customers",
+						url: "https://app.useautumn.com/customers",
+					}),
+				);
+			}
+			if (lastPlanId) {
+				linkButtons.push(
+					LinkButton({
+						label: "View Plan",
+						url: `https://app.useautumn.com/products/${encodeURIComponent(lastPlanId)}`,
+					}),
+				);
+			}
+
+			if (linkButtons.length > 0) {
+				await thread.post(Card({ children: [Text(responseText), Actions(linkButtons)] }));
+			} else {
+				await thread.post({ markdown: responseText });
+			}
+		} else {
+			console.warn(`agent rid=${rid} empty_response out=${response.usage.output_tokens}`);
+			await thread.post("Something went wrong, try rephrasing or starting a new thread.");
 		}
 	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		console.error("Agent loop failed", {
-			error: message,
-			org: workspace.orgName,
-			thread: thread.id,
-		});
-		await thread.post("Something went wrong, try again later.");
+		if (err instanceof RateLimitError) {
+			await thread.post("I'm being rate limited, try again in a moment.");
+		} else if (err instanceof APIConnectionError) {
+			await thread.post("I couldn't reach the AI service, try again in a moment.");
+		} else if (err instanceof APIError && err.status >= 500) {
+			await thread.post("The AI service is temporarily unavailable, try again later.");
+		} else {
+			const message = parseApiError(err);
+			console.error(`agent rid=${rid} err="${message}"`);
+			await thread.post("Something went wrong, try again later.");
+		}
+	} finally {
+		activeThreads.delete(thread);
 	}
 }

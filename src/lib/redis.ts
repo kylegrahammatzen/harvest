@@ -9,3 +9,11 @@ export function getRedis(): Redis {
 	}
 	return _redis;
 }
+
+export async function flushStaleLocks(): Promise<number> {
+	const redis = getRedis();
+	const keys = await redis.keys("chat-sdk:lock:*");
+	if (keys.length === 0) return 0;
+	await redis.del(...keys);
+	return keys.length;
+}
