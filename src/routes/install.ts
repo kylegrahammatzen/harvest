@@ -78,7 +78,7 @@ installRoutes.get("/slack/callback", async (c) => {
 				"Installation failed",
 				isInvalidCode
 					? "The authorization code expired or was already used, try installing again."
-					: 'Something went wrong during installation, try again from <a href="/slack">/slack</a>.',
+					: "Something went wrong during installation, try again from /slack.",
 			),
 			400,
 		);
