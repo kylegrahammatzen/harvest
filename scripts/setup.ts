@@ -43,7 +43,7 @@ function startDocker() {
 	header("Starting Redis...");
 
 	try {
-		exec("docker compose -f docker-compose.dev.yml up -d");
+		exec("docker compose up -d");
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
 
