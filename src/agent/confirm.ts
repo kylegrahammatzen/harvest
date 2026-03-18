@@ -283,25 +283,6 @@ const actions: Record<string, ActionHandler> = {
 			};
 		},
 	},
-	cancel_subscription: {
-		required: ["customer_id", "plan_id"],
-		describe: (d) => `cancel *${d.plan_id}* for *${d.customer_id}*`,
-		execute: (autumn, d) =>
-			autumn.billing.update({
-				customerId: str(d.customer_id),
-				planId: str(d.plan_id),
-				cancelAction: "cancel_end_of_cycle",
-			}),
-		card: (d) => ({
-			title: "Subscription Canceled",
-			fields: [
-				["Customer", str(d.customer_id)],
-				["Plan", str(d.plan_id)],
-			],
-			text: "Cancellation takes effect at the end of the current billing cycle.",
-			links: [{ label: "View Customer", url: customerUrl(str(d.customer_id)) }],
-		}),
-	},
 	update_subscription: {
 		required: ["customer_id", "plan_id"],
 		describe: (d) => `update *${d.plan_id}* for *${d.customer_id}*`,

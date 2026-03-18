@@ -12,6 +12,7 @@ import { getWorkspace } from "@/services/workspace";
 
 const MAX_TOOL_ITERATIONS = 8;
 const MAX_RECOVERY_DEPTH = 1;
+const MAX_HISTORY = 20;
 
 const MODEL = "claude-opus-4-6";
 
@@ -76,7 +77,7 @@ function getAnthropic(): Anthropic {
 	return _anthropic;
 }
 
-async function resolveWorkspaceId(raw: unknown): Promise<string | null> {
+function resolveWorkspaceId(raw: unknown): string | null {
 	const workspaceId = getWorkspaceIdFromRaw(raw);
 	if (!workspaceId) {
 		const rawObj = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
@@ -87,133 +88,96 @@ async function resolveWorkspaceId(raw: unknown): Promise<string | null> {
 	return workspaceId;
 }
 
-export async function handleAgentMention(thread: Thread, message: Message): Promise<void> {
+async function handleIncomingAgentMessage(
+	thread: Thread,
+	message: Message,
+	mode: "mention" | "subscribed",
+): Promise<void> {
 	if (thread.isDM) {
-		await thread.post("DMs aren't supported yet, mention me in a channel instead.");
+		if (mode === "mention") {
+			await thread.post("DMs aren't supported yet, mention me in a channel instead.");
+		}
 		return;
 	}
 
-	const workspaceId = await resolveWorkspaceId(message.raw);
+	const workspaceId = resolveWorkspaceId(message.raw);
 	const workspace = workspaceId ? await getWorkspace(workspaceId) : null;
 
-	await thread.subscribe();
+	if (mode === "mention") {
+		await thread.subscribe();
+	}
 
 	if (!workspace) {
-		console.warn(`workspace_lookup err=not_found id=${workspaceId} channel=${thread.channelId}`);
-		await thread.post("Ask an admin to run `/connect` to set up Autumn for this workspace.");
+		if (mode === "mention") {
+			console.warn(`workspace_lookup err=not_found id=${workspaceId} channel=${thread.channelId}`);
+			await thread.post("Ask an admin to run `/connect` to set up Autumn for this workspace.");
+		} else {
+			await thread.post("Run `/connect` to set up Autumn first.");
+		}
 		return;
 	}
 
 	if (!workspace.apiKey) {
 		await thread.post(
-			"This workspace isn't connected to Autumn yet, run `/connect` to get started.",
+			mode === "mention"
+				? "This workspace isn't connected to Autumn yet, run `/connect` to get started."
+				: "Run `/connect` to set up Autumn first.",
 		);
 		return;
 	}
 
-	if (
+	const channelBlocked =
 		workspace.commandChannels.length > 0 &&
 		thread.channelId &&
-		!workspace.commandChannels.includes(thread.channelId)
-	) {
-		await thread.post("Autumn isn't enabled in this channel, ask an admin to add it in settings.");
+		!workspace.commandChannels.includes(thread.channelId);
+
+	if (channelBlocked) {
+		if (mode === "mention") {
+			await thread.post(
+				"Autumn isn't enabled in this channel, ask an admin to add it in settings.",
+			);
+		}
 		return;
 	}
 
-	await runAgentLoop(thread, message);
+	const text = message.text.length > 80 ? `${message.text.slice(0, 80)}...` : message.text;
+	const rid = message.id;
+	console.log(`agent rid=${rid} org=${workspace.orgSlug} msg="${text}"`);
+
+	const messages = await buildMessages(thread, message);
+	await runAgentLoopInner(thread, workspace, messages, 0, rid);
+}
+
+export async function handleAgentMention(thread: Thread, message: Message): Promise<void> {
+	await handleIncomingAgentMessage(thread, message, "mention");
 }
 
 export async function handleAgentMessage(thread: Thread, message: Message): Promise<void> {
-	if (thread.isDM) return;
-
-	const workspaceId = await resolveWorkspaceId(message.raw);
-	const workspace = workspaceId ? await getWorkspace(workspaceId) : null;
-
-	if (!workspace?.apiKey) {
-		await thread.post("Run `/connect` to set up Autumn first.");
-		return;
-	}
-
-	if (
-		workspace.commandChannels.length > 0 &&
-		thread.channelId &&
-		!workspace.commandChannels.includes(thread.channelId)
-	)
-		return;
-
-	await runAgentLoop(thread, message);
+	await handleIncomingAgentMessage(thread, message, "subscribed");
 }
 
-const MAX_HISTORY = 20;
-const SUMMARIZE_THRESHOLD = 10;
+async function buildMessages(thread: Thread, message: Message): Promise<Anthropic.MessageParam[]> {
+	await thread.refresh();
 
-async function buildMessages(
-	thread: Thread,
-	message: Message,
-	anthropic: Anthropic,
-): Promise<Anthropic.MessageParam[]> {
-	const raw: { role: "user" | "assistant"; content: string }[] = [];
-
-	for await (const msg of thread.allMessages) {
-		if (!msg.text.trim()) continue;
-		raw.push({
-			role: msg.author.isMe ? "assistant" : "user",
-			content: msg.text,
-		});
-		if (raw.length >= MAX_HISTORY) break;
-	}
-
-	if (raw.length <= 1) {
-		return [{ role: "user", content: message.text }];
-	}
-
-	// Keep only user messages and assistant messages that aren't error responses.
-	// For the last user message, always include it fresh (it's the current request).
-	const history = raw.map((msg) => {
-		if (msg.role === "assistant") {
+	const history = thread.recentMessages
+		.filter((msg) => msg.text.trim().length > 0)
+		.sort((a, b) => a.metadata.dateSent.getTime() - b.metadata.dateSent.getTime())
+		.slice(-MAX_HISTORY)
+		.map((msg) => {
+			if (msg.author.isMe) {
+				return {
+					role: "assistant" as const,
+					content: `[Previous response — may be outdated, always re-check with tools]\n${msg.text}`,
+				};
+			}
 			return {
-				role: msg.role,
-				content: `[Previous response — may be outdated, always re-check with tools]\n${msg.content}`,
+				role: "user" as const,
+				content: msg.text,
 			};
-		}
-		return msg;
-	});
-
-	if (history.length > SUMMARIZE_THRESHOLD) {
-		const older = history.slice(0, -3);
-		const recent = history.slice(-3);
-		const transcript = older
-			.filter((m) => m.role === "user")
-			.map((m) => m.content)
-			.join("\n");
-
-		const summary = await anthropic.messages.create({
-			model: MODEL,
-			max_tokens: 512,
-			messages: [
-				{
-					role: "user",
-					content: `Summarize what the user asked for in 2-3 sentences. Preserve all exact customer IDs, plan IDs, and email addresses mentioned. Only include what the user requested, not any bot responses or errors:\n\n${transcript}`,
-				},
-			],
 		});
 
-		const summaryText = summary.content
-			.filter((b): b is Anthropic.TextBlock => b.type === "text")
-			.map((b) => b.text)
-			.join("");
-
-		return [
-			{ role: "user", content: `[Previous conversation context: ${summaryText}]` },
-			{
-				role: "assistant",
-				content: "Got it.",
-			},
-			...recent,
-		];
-	}
-
-	return history;
+	if (history.length > 0) return history;
+	return [{ role: "user", content: message.text }];
 }
 
 type PendingMutation = {
@@ -235,7 +199,7 @@ export async function runAgentWithContext(
 		return;
 	}
 
-	const workspaceId = await resolveWorkspaceId(raw);
+	const workspaceId = resolveWorkspaceId(raw);
 	if (!workspaceId) return;
 
 	const workspace = await getWorkspace(workspaceId);
@@ -244,22 +208,6 @@ export async function runAgentWithContext(
 	const rid = `recovery-${recoveryDepth}`;
 	console.log(`agent rid=${rid} org=${workspace.orgSlug} msg="${text.slice(0, 80)}"`);
 	await runAgentLoopInner(thread, workspace, [{ role: "user", content: text }], recoveryDepth, rid);
-}
-
-async function runAgentLoop(thread: Thread, message: Message): Promise<void> {
-	const workspaceId = await resolveWorkspaceId(message.raw);
-	if (!workspaceId) return;
-
-	const workspace = await getWorkspace(workspaceId);
-	if (!workspace) return;
-
-	const text = message.text.length > 80 ? `${message.text.slice(0, 80)}...` : message.text;
-	const rid = message.id;
-	console.log(`agent rid=${rid} org=${workspace.orgSlug} msg="${text}"`);
-
-	const anthropic = getAnthropic();
-	const messages = await buildMessages(thread, message, anthropic);
-	await runAgentLoopInner(thread, workspace, messages, 0, rid);
 }
 
 async function runAgentLoopInner(
@@ -292,17 +240,21 @@ async function runAgentLoopInner(
 			);
 		};
 
-		let t0 = Date.now();
-		let response = await anthropic.messages.create({
-			model: MODEL,
-			max_tokens: 4096,
-			system: systemPrompt,
-			tools: getTools(loadedSkills),
-			messages,
-		});
-		logLLM(response, Date.now() - t0);
+		let response: Anthropic.Message;
 
-		while (response.stop_reason === "tool_use") {
+		while (true) {
+			const t0 = Date.now();
+			response = await anthropic.messages.create({
+				model: MODEL,
+				max_tokens: 4096,
+				system: systemPrompt,
+				tools: getTools(loadedSkills),
+				messages,
+			});
+			logLLM(response, Date.now() - t0);
+
+			if (response.stop_reason !== "tool_use") break;
+
 			iterations++;
 			if (iterations > MAX_TOOL_ITERATIONS) {
 				console.warn(`agent rid=${rid} err=tool_loop_exceeded iterations=${iterations}`);
@@ -335,28 +287,33 @@ async function runAgentLoopInner(
 				}
 			}
 
-			const readResults = await Promise.all(
-				readBlocks.map(async (toolUse) => {
-					const params = toolUse.input as Record<string, unknown>;
-					const paramStr = Object.entries(params)
-						.map(([k, v]) => `${k}=${v}`)
-						.join(" ");
-					const toolStart = Date.now();
-					const result = await executeTool(toolUse.name, params, autumn);
-					const toolMs = Date.now() - toolStart;
-					if (result.success) {
-						console.log(`tool rid=${rid} ${toolUse.name} ok ms=${toolMs} ${paramStr}`);
-					} else {
-						console.warn(
-							`tool rid=${rid} ${toolUse.name} err="${result.error}" ms=${toolMs} ${paramStr}`,
-						);
-					}
-					return {
-						type: "tool_result" as const,
-						tool_use_id: toolUse.id,
-						content: JSON.stringify(result),
-					};
-				}),
+			const readResultsById = new Map(
+				(
+					await Promise.all(
+						readBlocks.map(async (toolUse) => {
+							const params = toolUse.input as Record<string, unknown>;
+							const paramStr = Object.entries(params)
+								.map(([k, v]) => `${k}=${v}`)
+								.join(" ");
+							const toolStart = Date.now();
+							const result = await executeTool(toolUse.name, params, autumn);
+							const toolMs = Date.now() - toolStart;
+							if (result.success) {
+								console.log(`tool rid=${rid} ${toolUse.name} ok ms=${toolMs} ${paramStr}`);
+							} else {
+								console.warn(
+									`tool rid=${rid} ${toolUse.name} err="${result.error}" ms=${toolMs} ${paramStr}`,
+								);
+							}
+							const toolResult = {
+								type: "tool_result" as const,
+								tool_use_id: toolUse.id,
+								content: JSON.stringify(result),
+							};
+							return [toolUse.id, toolResult] as const;
+						}),
+					)
+				),
 			);
 
 			const toolResults: Anthropic.ToolResultBlockParam[] = [];
@@ -382,24 +339,14 @@ async function runAgentLoopInner(
 							params: toolUse.input,
 						}),
 					});
-				} else {
-					const readResult = readResults.find((r) => r.tool_use_id === toolUse.id);
-					if (readResult) toolResults.push(readResult);
+					continue;
 				}
+				const readResult = readResultsById.get(toolUse.id);
+				if (readResult) toolResults.push(readResult);
 			}
 
 			messages.push({ role: "assistant", content: response.content });
 			messages.push({ role: "user", content: toolResults });
-
-			t0 = Date.now();
-			response = await anthropic.messages.create({
-				model: MODEL,
-				max_tokens: 4096,
-				system: systemPrompt,
-				tools: getTools(loadedSkills),
-				messages,
-			});
-			logLLM(response, Date.now() - t0);
 		}
 
 		const textBlocks = response.content.filter((b): b is Anthropic.TextBlock => b.type === "text");
@@ -411,60 +358,40 @@ async function runAgentLoopInner(
 				...pendingMutation.toolInput,
 				_recoveryDepth: recoveryDepth,
 			};
-
-			const invoiceButton = Button({
-				id: "confirm_invoice",
-				label: "Draft Invoice",
-				value: JSON.stringify({
-					...actionPayload,
-					invoice_mode: { enabled: true, finalize: false },
+			const actionValue = JSON.stringify(actionPayload);
+			const isAttachPlan = pendingMutation.toolName === "attach_plan";
+			const isPlanSwitch =
+				isAttachPlan && !!(pendingMutation.toolInput as Record<string, unknown>).is_plan_switch;
+			const buttons: ReturnType<typeof Button>[] = [
+				Button({
+					id: "confirm",
+					label: isAttachPlan ? (isPlanSwitch ? "Confirm Charge" : "Checkout Link") : "Confirm",
+					style: "primary",
+					value: actionValue,
 				}),
-			});
+			];
 
-			const cancelButton = Button({
-				id: "cancel",
-				label: "Cancel",
-				style: "danger",
-				value: JSON.stringify(actionPayload),
-			});
-
-			let buttons: ReturnType<typeof Button>[];
-			if (pendingMutation.toolName === "attach_plan") {
-				const isPlanSwitch = !!(pendingMutation.toolInput as Record<string, unknown>)
-					.is_plan_switch;
-
-				buttons = isPlanSwitch
-					? [
-							Button({
-								id: "confirm",
-								label: "Confirm Charge",
-								style: "primary",
-								value: JSON.stringify(actionPayload),
-							}),
-							invoiceButton,
-							cancelButton,
-						]
-					: [
-							Button({
-								id: "confirm",
-								label: "Checkout Link",
-								style: "primary",
-								value: JSON.stringify(actionPayload),
-							}),
-							invoiceButton,
-							cancelButton,
-						];
-			} else {
-				buttons = [
+			if (isAttachPlan) {
+				buttons.push(
 					Button({
-						id: "confirm",
-						label: "Confirm",
-						style: "primary",
-						value: JSON.stringify(actionPayload),
+						id: "confirm_invoice",
+						label: "Draft Invoice",
+						value: JSON.stringify({
+							...actionPayload,
+							invoice_mode: { enabled: true, finalize: false },
+						}),
 					}),
-					cancelButton,
-				];
+				);
 			}
+
+			buttons.push(
+				Button({
+					id: "cancel",
+					label: "Cancel",
+					style: "danger",
+					value: actionValue,
+				}),
+			);
 
 			await thread.post(
 				Card({

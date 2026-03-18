@@ -1,33 +1,11 @@
 import { createSlackAdapter } from "@chat-adapter/slack";
 import { createRedisState } from "@chat-adapter/state-redis";
-import { Chat, LockError } from "chat";
+import { Chat } from "chat";
 import { handleCancelAction, handleConfirmAction } from "@/agent/confirm";
 import { handleAgentMention, handleAgentMessage } from "@/agent/handler";
 import { handleSlashCommandByName } from "@/commands/router";
 import { getEnv } from "@/config";
 import { getWorkspace } from "@/services/workspace";
-
-const LOCK_RETRY_DELAY_MS = 2000;
-const LOCK_MAX_RETRIES = 3;
-
-function withLockRetry<T extends unknown[]>(
-	fn: (...args: T) => Promise<void>,
-): (...args: T) => Promise<void> {
-	return async (...args: T) => {
-		for (let attempt = 0; attempt <= LOCK_MAX_RETRIES; attempt++) {
-			try {
-				return await fn(...args);
-			} catch (err) {
-				if (err instanceof LockError && attempt < LOCK_MAX_RETRIES) {
-					console.warn(`lock_retry attempt=${attempt + 1} delay=${LOCK_RETRY_DELAY_MS}ms`);
-					await new Promise((r) => setTimeout(r, LOCK_RETRY_DELAY_MS));
-					continue;
-				}
-				throw err;
-			}
-		}
-	};
-}
 
 const env = getEnv();
 
@@ -36,10 +14,7 @@ export const slackAdapter = createSlackAdapter({
 	clientSecret: env.SLACK_CLIENT_SECRET,
 });
 
-// Patch: the Chat SDK doesn't forward enough context from the outer
-// event_callback envelope onto the inner event object. We fix two gaps:
-// 1. app_home_opened events don't get team_id at all
-// 2. authorizations (needed for Slack Connect) aren't copied for any event type
+// Patch missing Slack envelope fields onto inner events for App Home + Slack Connect.
 const adapter = slackAdapter as unknown as Record<string, unknown>;
 
 const origProcess = adapter.processEventPayload as (
@@ -83,18 +58,13 @@ bot.onSlashCommand(async (event) => {
 	await handleSlashCommandByName(event);
 });
 
-bot.onNewMessage(
-	/@Autumn/i,
-	withLockRetry(async (thread, message) => {
-		await handleAgentMention(thread, message);
-	}),
-);
+bot.onNewMention(async (thread, message) => {
+	await handleAgentMention(thread, message);
+});
 
-bot.onSubscribedMessage(
-	withLockRetry(async (thread, message) => {
-		await handleAgentMessage(thread, message);
-	}),
-);
+bot.onSubscribedMessage(async (thread, message) => {
+	await handleAgentMessage(thread, message);
+});
 
 bot.onAction(["confirm", "confirm_invoice"], async (event) => {
 	await handleConfirmAction(event);
