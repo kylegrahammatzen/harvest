@@ -1,27 +1,32 @@
 const ALGORITHM = "AES-GCM";
 const IV_LENGTH = 12;
 const TAG_LENGTH = 128;
-
-let _key: CryptoKey | null = null;
+const HEX_RE = /^[0-9a-f]+$/i;
 
 async function getKey(encryptionKey: string): Promise<CryptoKey> {
-	if (!_key) {
-		const keyBytes = hexToBytes(encryptionKey);
-		_key = await crypto.subtle.importKey(
-			"raw",
-			keyBytes as BufferSource,
-			{ name: ALGORITHM },
-			false,
-			["encrypt", "decrypt"],
-		);
+	const keyBytes = hexToBytes(encryptionKey, "encryption key");
+	if (keyBytes.length !== 16 && keyBytes.length !== 24 && keyBytes.length !== 32) {
+		throw new Error("ENCRYPTION_KEY must be 32, 48, or 64 hex characters");
 	}
-	return _key;
+
+	return crypto.subtle.importKey(
+		"raw",
+		keyBytes as BufferSource,
+		{ name: ALGORITHM },
+		false,
+		["encrypt", "decrypt"],
+	);
 }
 
-function hexToBytes(hex: string): Uint8Array {
-	const bytes = new Uint8Array(hex.length / 2);
-	for (let i = 0; i < hex.length; i += 2) {
-		bytes[i / 2] = Number.parseInt(hex.substring(i, i + 2), 16);
+function hexToBytes(hex: string, label: string): Uint8Array {
+	const normalized = hex.trim();
+	if (normalized.length === 0 || normalized.length % 2 !== 0 || !HEX_RE.test(normalized)) {
+		throw new Error(`Invalid ${label} hex`);
+	}
+
+	const bytes = new Uint8Array(normalized.length / 2);
+	for (let i = 0; i < normalized.length; i += 2) {
+		bytes[i / 2] = Number.parseInt(normalized.substring(i, i + 2), 16);
 	}
 	return bytes;
 }
@@ -50,9 +55,18 @@ export async function encrypt(plaintext: string, encryptionKey: string): Promise
 
 export async function decrypt(encrypted: string, encryptionKey: string): Promise<string> {
 	const key = await getKey(encryptionKey);
-	const [ivHex, ctHex] = encrypted.split(":");
-	const iv = hexToBytes(ivHex);
-	const ciphertext = hexToBytes(ctHex);
+	const parts = encrypted.split(":");
+	if (parts.length !== 2) {
+		throw new Error("Invalid encrypted payload format");
+	}
+
+	const [ivHex, ctHex] = parts;
+	const iv = hexToBytes(ivHex, "iv");
+	if (iv.length !== IV_LENGTH) {
+		throw new Error("Invalid iv length");
+	}
+
+	const ciphertext = hexToBytes(ctHex, "ciphertext");
 
 	const plaintext = await crypto.subtle.decrypt(
 		{ name: ALGORITHM, iv: iv as BufferSource, tagLength: TAG_LENGTH },
