@@ -11,6 +11,7 @@ import {
 	TrialConvertedCard,
 	UsageAlertCard,
 } from "@/cards/alert";
+import type { WorkspaceConfig } from "@/services/workspace";
 import { getWorkspace, listWorkspaces } from "@/services/workspace";
 
 export const autumnWebhookRoutes = new Hono();
@@ -39,7 +40,13 @@ autumnWebhookRoutes.post("/", async (c) => {
 		return c.text("Invalid JSON", 400);
 	}
 
-	const secret = await findWebhookSecret(payload.org_id);
+	const workspaces = await loadWorkspaces();
+	const workspace = payload.org_id
+		? workspaces.find((ws) => ws.orgSlug === payload.org_id) || null
+		: null;
+	const secret = payload.org_id
+		? workspace?.webhookSecret || null
+		: workspaces.find((ws) => ws.webhookSecret)?.webhookSecret || null;
 
 	if (secret) {
 		try {
@@ -57,7 +64,7 @@ autumnWebhookRoutes.post("/", async (c) => {
 
 	try {
 		console.log(`Webhook: ${payload.type}${payload.org_id ? ` (${payload.org_id})` : ""}`);
-		await routeAutumnEvent(payload);
+		await routeAutumnEvent(payload, workspace);
 		return c.text("OK", 200);
 	} catch (err) {
 		console.error("Failed to process Autumn webhook:", err);
@@ -65,19 +72,16 @@ autumnWebhookRoutes.post("/", async (c) => {
 	}
 });
 
-async function findWebhookSecret(orgId?: string): Promise<string | null> {
+async function loadWorkspaces(): Promise<WorkspaceConfig[]> {
 	const workspaceIds = await listWorkspaces();
-	for (const id of workspaceIds) {
-		const ws = await getWorkspace(id);
-		if (ws?.webhookSecret && (!orgId || ws.orgSlug === orgId)) {
-			return ws.webhookSecret;
-		}
-	}
-	return null;
+	const workspaces = await Promise.all(workspaceIds.map((id) => getWorkspace(id)));
+	return workspaces.filter((ws): ws is WorkspaceConfig => ws !== null);
 }
 
-async function routeAutumnEvent(event: AutumnWebhookEvent): Promise<void> {
-	const workspace = await findWorkspaceForEvent(event);
+async function routeAutumnEvent(
+	event: AutumnWebhookEvent,
+	workspace: WorkspaceConfig | null,
+): Promise<void> {
 	if (!workspace) {
 		console.warn(`No workspace found for Autumn event: ${event.type}`);
 		return;
@@ -102,17 +106,6 @@ async function routeAutumnEvent(event: AutumnWebhookEvent): Promise<void> {
 	} catch (err) {
 		console.error(`Failed to post alert to channel ${workspace.alertChannel}:`, err);
 	}
-}
-
-async function findWorkspaceForEvent(event: AutumnWebhookEvent) {
-	const workspaceIds = await listWorkspaces();
-	for (const id of workspaceIds) {
-		const ws = await getWorkspace(id);
-		if (ws && event.org_id && ws.orgSlug === event.org_id) {
-			return ws;
-		}
-	}
-	return null;
 }
 
 function nested<T>(obj: Record<string, unknown>, key: string): T | undefined {
