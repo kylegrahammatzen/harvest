@@ -31,7 +31,7 @@ function getClient(): arctic.OAuth2Client {
 	);
 }
 
-function renderHtml(title: string, message: string): string {
+export function renderHtml(title: string, message: string): string {
 	return `
 <html>
 <head>
@@ -167,7 +167,8 @@ export async function handleAutumnOAuthCallback(c: Context) {
 			slackBotToken: existing?.slackBotToken || null,
 			webhookSecret: existing?.webhookSecret || null,
 			installedAt: existing?.installedAt || Date.now(),
-			installedBy: payload.userId,
+			installedBotUserId: existing?.installedBotUserId || null,
+			connectedByUserId: payload.userId,
 		});
 
 		console.log(`Workspace connected: ${orgName}`);

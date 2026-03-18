@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { slackAdapter } from "@/bot";
 import { getEnv } from "@/config";
-import { handleAutumnOAuthCallback } from "@/routes/connect";
+import { handleAutumnOAuthCallback, renderHtml } from "@/routes/connect";
 import { getWorkspace, saveWorkspace } from "@/services/workspace";
 
 export const installRoutes = new Hono();
@@ -60,34 +60,26 @@ installRoutes.get("/slack/callback", async (c) => {
 			slackBotToken: installation.botToken || null,
 			webhookSecret: existing?.webhookSecret || null,
 			installedAt: existing?.installedAt || Date.now(),
-			installedBy: installation.botUserId || "unknown",
+			installedBotUserId: installation.botUserId || existing?.installedBotUserId || null,
+			connectedByUserId: existing?.connectedByUserId || null,
 		});
 
 		console.log(`Slack bot installed: ${installation.teamName} (${teamId})`);
 
-		return c.html(`
-<html>
-<body style="font-family: system-ui; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
-	<div style="text-align: center;">
-		<h1>Autumn installed!</h1>
-		<p>Head back to Slack and run /connect to finish setup.</p>
-	</div>
-</body>
-</html>`);
+		return c.html(
+			renderHtml("Autumn installed!", "Head back to Slack and run /connect to finish setup."),
+		);
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		const isInvalidCode = message.includes("invalid_code");
 		console.error(`Slack OAuth failed: ${isInvalidCode ? "invalid_code" : message}`);
 		return c.html(
-			`
-<html>
-<body style="font-family: system-ui; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;">
-	<div style="text-align: center;">
-		<h1>Installation failed</h1>
-		<p>${isInvalidCode ? "The authorization code expired or was already used, try installing again." : 'Something went wrong during installation, try again from <a href="/slack">/slack</a>.'}</p>
-	</div>
-</body>
-</html>`,
+			renderHtml(
+				"Installation failed",
+				isInvalidCode
+					? "The authorization code expired or was already used, try installing again."
+					: 'Something went wrong during installation, try again from <a href="/slack">/slack</a>.',
+			),
 			400,
 		);
 	}

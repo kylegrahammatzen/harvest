@@ -12,7 +12,8 @@ export type WorkspaceConfig = {
 	slackBotToken: string | null;
 	webhookSecret: string | null;
 	installedAt: number;
-	installedBy: string;
+	installedBotUserId: string | null;
+	connectedByUserId: string | null;
 };
 
 const KEY_PREFIX = "autumn:workspace:";
